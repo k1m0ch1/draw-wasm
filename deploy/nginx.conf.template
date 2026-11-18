@@ -9,6 +9,8 @@ server {
     listen [::]:80;
     server_name @@HOST@@;
 
+    include snippets/cloudflare-realip.conf;
+
     location /.well-known/acme-challenge/ { root /var/www/html; }
 
     client_max_body_size 5m;
