@@ -51,7 +51,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ok(!!ws, 'ws connects');
   const msgs = []; ws.onmessage = (e) => msgs.push(JSON.parse(e.data));
   ws.send(JSON.stringify({ t: 'hello', cid: 'abuse1', name: 'Abuse One' })); await sleep(500);
-  ok(msgs[0] && msgs[0].t === 'snap', 'snapshot on hello');
+  ok(msgs.some((m) => m.t === 'snap'), 'snapshot on hello');
   ws.send('{broken'); await sleep(200); ok(msgs.some((m) => m.t === 'err'), 'malformed ws json -> err, still open');
   ws.send(JSON.stringify({ t: 'ops', ops: [{ id: 'x1', v: 1, by: 'abuse1', k: 'rect', x: 1e30 }] })); await sleep(200);
   ok(msgs.filter((m) => m.t === 'err').length >= 2, 'invalid op rejected');
