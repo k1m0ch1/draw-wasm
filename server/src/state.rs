@@ -307,7 +307,7 @@ pub fn clean_name(s: &str) -> Option<String> {
     if n == 0 || n > 32 {
         return None;
     }
-    if !t.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | ''')) {
+    if !t.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')) {
         return None;
     }
     Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
