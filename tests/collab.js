@@ -13,7 +13,17 @@ async function drag(page, a, b) {
   for (let i = 1; i <= 6; i++) await page.mouse.move(a[0] + ((b[0] - a[0]) * i) / 6, a[1] + ((b[1] - a[1]) * i) / 6);
   await page.mouse.up();
 }
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAFTEMLQkAnEpXASPjPrsAAAAAAElFTkSuQmCC', 'base64');
+const zlib = require('zlib');
+function makePng(w, h) {
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = x * 4; raw[o + 1] = y * 4; raw[o + 2] = 200; }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const png = makePng(60, 40);
 async function open(browser, url) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 760 } });
   const p = await ctx.newPage();
@@ -79,7 +89,9 @@ async function open(browser, url) {
   // late joiner
   const [ctxC, C] = await open(browser, url);
   await C.waitForFunction(() => window.__draw.wsOpen); await sleep(800);
-  ok((await dig(C)) === (await dig(A)) && (await sum(C)).length === 5, 'late joiner gets full state');
+  const [sa, sc] = [await sum(A), await sum(C)];
+  ok((await dig(C)) === (await dig(A)) && sc.length === 5, 'late joiner gets full state');
+  if ((await dig(C)) !== (await dig(A))) { console.log('A', JSON.stringify(sa)); console.log('C', JSON.stringify(sc)); }
   // concurrent edits to same element
   const id = (await sum(A)).find((e) => e.k === 'Rect').id;
   await Promise.all([A, B].map((p, i) => p.evaluate(({ id, i }) => {
