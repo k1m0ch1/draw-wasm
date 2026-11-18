@@ -75,3 +75,6 @@ button:disabled{opacity:.4;cursor:default}
   #style.open{display:blo
 .peer.owner{box-shadow:0 0 0 2px #f08c00}
 #modal input[type=text]{width:100%}
+#banner{position:fixed;left:50%;top:68px;transform:translateX(-50%);z-index:9;display:flex;align-items:center;gap:12px;max-width:92vw;padding:9px 14px;border-radius:12px;background:#fff8e1;border:1px solid #f0c36d;color:#5f4300;box-shadow:var(--shadow);font-size:13.5px}
+#banner.err{background:#fff0f0;border-color:#f3b4b4;color:#8a1c1c}
+#banner button{border:1px solid currentColor;background:transparent;border-radius:999px;padding:4px 12px;font-size:13px}

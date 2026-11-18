@@ -40,6 +40,14 @@ fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Statics) {
     }
 }
 
+/// The content hash of the deployed bundle, read from the asset paths in index.html.
+pub fn build_id(s: &Statics) -> String {
+    let Some(f) = s.get("index.html") else { return String::new() };
+    let t = String::from_utf8_lossy(&f.bytes);
+    let Some(i) = t.find("/assets/") else { return String::new() };
+    t[i + 8..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect()
+}
+
 pub fn load(dir: &str) -> Statics {
     let mut m = HashMap::new();
     let base = std::path::Path::new(dir);

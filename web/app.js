@@ -38,7 +38,8 @@ const S = {
   ws: null, wsOpen: false, wsTry: 0, you: null, peers: new Map(), cursors: new Map(),
   seq: 0, owner: false, token: '', name: '', needName: false, title: '', lastPing: 0, stopped: false,
   spaceDown: false, pointers: new Map(), pan: null, pinch: null, editing: null,
-  lastCursorSent: 0, netWrites: 0,
+  lastCursorSent: 0, netWrites: 0, mouse: null,
+  build: document.querySelector('meta[name=draw-build]')?.content || '', reloadNeeded: false,
 };
 window.__draw = S; // inspection hook for tests; contains no secrets
 
@@ -250,20 +251,27 @@ function scanImages() {
   // make sure every referenced image is loadable (the Gfx lazily loads on draw)
   for (const h of JSON.parse(S.board.images_used())) pendingImages.add(h);
 }
+const imgUrl = (h) => `/api/rooms/${route.room}/docs/${route.nano}/images`;
+/** Make sure the server holds these images for this document (background, retried, shown on the element). */
+function uploadImages(hashes) {
+  if (route.kind !== 'doc') return;
+  for (const h of hashes) S.images.upload(h, imgUrl(h));
+}
+function imageHashesIn(json) {
+  try { return [...new Set(JSON.parse(json).filter((e) => e && e.k === 'image' && e.img).map((e) => e.img))]; } catch { return []; }
+}
+/** The element appears at once; the upload runs in the background and its state is drawn on the element. */
 async function addImageFile(file, at) {
   try {
     if (!file.type.startsWith('image/')) { toast('That file is not an image'); return; }
     const img = await prepareImage(file);
     await idb.put('images', img.hash, img.blob).catch(() => {});
     S.images.set(img.hash, img.bmp);
-    if (route.kind === 'doc') {
-      const r = await fetch(`/api/rooms/${route.room}/docs/${route.nano}/images`, { method: 'POST', body: img.blob });
-      if (!r.ok) { toast((await r.json().catch(() => ({}))).error || 'Image upload failed'); return; }
-    }
-    const x = at ? at[0] : S.w / 2, y = at ? at[1] : S.h / 2;
-    S.board.add_image(img.hash, img.w, img.h, x, y);
+    const p = at || S.mouse || [S.w / 2, S.h / 2];
+    S.board.add_image(img.hash, img.w, img.h, p[0], p[1]);
     S.board.invalidate();
-  } catch (e) { toast('Could not add the image: ' + (e && e.message || e)); }
+    uploadImages([img.hash]);
+  } catch (e) { toast('Could not add the image: ' + (e && e.message || e), 8000); }
 }
 
 // ---------------------------------------------------------------- text editing overlay
@@ -343,6 +351,9 @@ function localPos(ev) {
 function bindInput() {
   const cv = S.canvas;
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  cv.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll cursor
+  cv.addEventListener('auxclick', (e) => e.preventDefault());
+  cv.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') S.mouse = null; });
   cv.addEventListener('pointerdown', (ev) => {
     cv.focus({ preventScroll: true });
     commitEdit();
@@ -358,6 +369,7 @@ function bindInput() {
     }
     if (S.pointers.size > 2) return;
     if (ev.button === 1 || (ev.button === 0 && S.spaceDown)) {
+      S.board.cancel();
       S.pan = { last: p };
       ev.preventDefault();
       return;
@@ -377,6 +389,7 @@ function bindInput() {
   });
   cv.addEventListener('pointermove', (ev) => {
     const p = localPos(ev);
+    if (ev.pointerType === 'mouse') S.mouse = p;
     if (S.pointers.has(ev.pointerId)) S.pointers.set(ev.pointerId, p);
     if (S.pinch && S.pointers.size >= 2) {
       const [a, b] = [...S.pointers.values()];
@@ -412,8 +425,15 @@ function bindInput() {
     const p = localPos(ev);
     let dy = ev.deltaY, dx = ev.deltaX;
     if (ev.deltaMode === 1) { dy *= 16; dx *= 16; }
-    if (ev.shiftKey && !ev.ctrlKey) { S.board.pan(-dy, 0); return; }
-    S.board.zoom_at(p[0], p[1], Math.exp(-dy * (ev.ctrlKey ? 0.01 : 0.0015)));
+    if (ev.ctrlKey) { S.board.zoom_at(p[0], p[1], Math.exp(-dy * 0.01)); return; } // pinch on a touchpad / ctrl+wheel
+    if (ev.shiftKey && dx === 0) { S.board.pan(-dy, 0); return; }
+    // A touchpad two-finger scroll sends small / fractional / horizontal deltas: pan. A mouse wheel
+    // sends big whole steps: zoom to the cursor.
+    const now = performance.now();
+    const padLike = ev.deltaMode === 0 && (dx !== 0 || !Number.isInteger(dy) || Math.abs(dy) < 40);
+    if (padLike) S.padAt = now;
+    if (padLike || (S.padAt && now - S.padAt < 120)) { S.board.pan(-dx, -dy); return; }
+    S.board.zoom_at(p[0], p[1], Math.exp(-dy * 0.0015));
   }, { passive: false });
 
   $('stage').addEventListener('dragover', (e) => { e.preventDefault(); $('dropmask').classList.remove('hidden'); });
@@ -427,7 +447,7 @@ function bindInput() {
     for (const [i, f] of files.entries()) await addImageFile(f, [p[0] + i * 24, p[1] + i * 24]);
   });
   // Copy/cut put the selected elements on the SYSTEM clipboard (replacing whatever was there).
-  const typing = () => S.editing || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || !$('modal').classList.contains('hidden');
+  const typing = () => S.editing || isTextField(document.activeElement) || !$('modal').classList.contains('hidden');
   const copyEvt = (cut) => (e) => {
     if (typing() || !S.board) return;
     const j = S.board.copy_json();
@@ -445,36 +465,72 @@ function bindInput() {
     const text = cd?.getData('text/plain') || '';
     if (text.startsWith(CLIP_PREFIX)) { // elements copied from this app (any document or tab)
       e.preventDefault();
-      S.board.paste_json(text.slice(CLIP_PREFIX.length));
+      const j = text.slice(CLIP_PREFIX.length);
+      const at = S.mouse || [NaN, NaN];
+      S.board.paste_json(j, at[0], at[1]);
+      uploadImages(imageHashesIn(j)); // the bytes may only be in another document or on the server
       return;
     }
     const files = [...(cd?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/'));
     if (files.length) {
       e.preventDefault();
-      for (const it of files) { const f = it.getAsFile(); if (f) await addImageFile(f); }
+      let n = 0;
+      for (const it of files) { const f = it.getAsFile(); if (f) await addImageFile(f, S.mouse ? [S.mouse[0] + 24 * n, S.mouse[1] + 24 * n] : null); n++; }
     } else if (text.trim()) { // plain text from elsewhere becomes a text label
       e.preventDefault();
       const t = text.slice(0, 2000);
       const [w, h] = textSize(t, S.board.default_fs());
-      S.board.add_text(t, w, h, S.w / 2, S.h / 2);
+      const at = S.mouse || [S.w / 2, S.h / 2];
+      S.board.add_text(t, w, h, at[0], at[1]);
     }
   });
   $('filepick').addEventListener('change', async (e) => {
     for (const f of e.target.files) await addImageFile(f);
     e.target.value = '';
   });
+  // Space is handled in the capture phase so no focused control can swallow it or be activated by it.
+  window.addEventListener('keydown', onSpaceDown, true);
+  window.addEventListener('keyup', onSpaceUp, true);
   window.addEventListener('keydown', onKey);
-  window.addEventListener('keyup', (e) => { if (e.code === 'Space') { S.spaceDown = false; } });
-  window.addEventListener('blur', () => { S.spaceDown = false; });
+  window.addEventListener('blur', () => { S.spaceDown = false; S.pan = null; });
+  // buttons never keep keyboard focus after a pointer click (keyboard users keep normal focus)
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('button');
+    if (b && e.detail > 0 && !$('modal').contains(b)) b.blur();
+  }, true);
+}
+function isTextField(t) {
+  if (!t || !t.tagName) return false;
+  if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable) return true;
+  return t.tagName === 'INPUT' && !/^(button|checkbox|radio|file|range|submit|reset|color|image)$/i.test(t.type || 'text');
+}
+function spaceBlocked() { return !!S.editing || isTextField(document.activeElement) || !$('modal').classList.contains('hidden'); }
+function onSpaceDown(e) {
+  if (e.code !== 'Space' || !S.board || isTextField(e.target) || spaceBlocked()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && ae !== S.canvas && ae.blur) ae.blur(); // never activate a focused button
+  S.spaceDown = true;
+  // Space pressed while the mouse is already down: switch to panning from the current position
+  if (!S.pan && !S.pinch && S.pointers.size === 1) {
+    S.board.cancel();
+    S.pan = { last: [...S.pointers.values()][0] };
+  }
+}
+function onSpaceUp(e) {
+  if (e.code !== 'Space') return;
+  if (S.spaceDown) { e.preventDefault(); e.stopPropagation(); }
+  S.spaceDown = false;
 }
 function syncToolButtons() { /* the frame loop mirrors board.tool() into the toolbar */ }
 
 function onKey(e) {
-  if (S.editing || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || !$('modal').classList.contains('hidden')) return;
+  if (S.editing || isTextField(e.target) || !$('modal').classList.contains('hidden')) return;
   const b = S.board;
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
-  if (e.code === 'Space') { S.spaceDown = true; e.preventDefault(); return; }
+  if (e.code === 'Space') return;
   if (mod) {
     if (k === 'z') { e.preventDefault(); e.shiftKey ? b.redo() : b.undo(); }
     else if (k === 'y') { e.preventDefault(); b.redo(); }
@@ -635,15 +691,14 @@ function connect() {
   ws.__live = true;
   setStatus(S.wsTry ? 'Reconnecting...' : 'Connecting...');
   ws.onopen = () => {
-    S.wsTry = 0;
-    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: S.name, token: S.token, seq: S.seq }));
+    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: S.name, token: S.token, seq: S.seq, build: S.build }));
     clearInterval(S.pingT);
     S.pingT = setInterval(() => wsSend({ t: 'ping' }), 25000);
   };
   ws.onmessage = (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
-    onServer(m);
+    S.chain = (S.chain || Promise.resolve()).then(() => onServer(m)).catch((e) => console.error(e));
   };
   ws.onclose = () => {
     ws.__live = false;
@@ -652,17 +707,68 @@ function connect() {
     clearInterval(S.pingT);
     S.peers.clear(); S.cursors.clear(); renderPeers();
     if (S.stopped) return;
-    setStatus('Offline: reconnecting...');
-    const wait = Math.min(8000, 400 * 2 ** Math.min(S.wsTry++, 5)) + Math.random() * 300;
+    // exponential backoff with jitter, up to ~30 s; a socket that opens but is rejected counts as a failure
+    const wait = Math.min(30000, 500 * 2 ** Math.min(S.wsTry++, 7)) * (0.75 + Math.random() * 0.5);
+    S.nextTryAt = Date.now() + wait;
+    offlineNotice();
     clearTimeout(S.rcT);
     S.rcT = setTimeout(connect, wait);
   };
   ws.onerror = () => {};
 }
-function onServer(m) {
+function showBanner(text, cls, actionLabel, action) {
+  const bn = $('banner');
+  bn.className = cls || '';
+  bn.replaceChildren(el('span', {}, text));
+  if (actionLabel) bn.append(el('button', { type: 'button', id: 'banner-action', onclick: action }, actionLabel));
+}
+function hideBanner() { if (!S.reloadNeeded) $('banner').className = 'hidden'; }
+function offlineNotice() {
+  if (S.reloadNeeded || S.needName) return;
+  const tries = S.wsTry;
+  const secs = Math.max(1, Math.round(((S.nextTryAt || Date.now()) - Date.now()) / 1000));
+  setStatus(`Offline: retrying in ${secs}s`);
+  if (tries >= 2 || !navigator.onLine) {
+    showBanner('You are offline: your edits are not being shared. They are kept and will be sent when the connection returns.', 'err', 'Retry now', () => { S.wsTry = 0; connect(); });
+  }
+}
+const PEND = () => 'pend:' + route.room + '/' + route.nano;
+async function reloadPage() {
+  // keep edits that were not sent yet, they are merged back after the reload
+  try { if (S.board.has_ops()) await idb.put('meta', PEND(), S.board.export_all()); } catch { /* best effort */ }
+  S.stopped = true;
+  location.reload();
+}
+function onReload(m) {
+  if (S.reloadNeeded) return;
+  S.reloadNeeded = true;
+  S.stopped = true; // stop reconnecting with an outdated client
+  try { S.ws.close(); } catch { /* already closed */ }
+  const last = Number(sessionStorage.getItem('draw-reloaded') || 0);
+  const looping = Date.now() - last < 20000; // we already reloaded a moment ago: do not loop
+  const go = () => { sessionStorage.setItem('draw-reloaded', String(Date.now())); reloadPage(); };
+  setStatus('A new version is available');
+  if (!S.board.has_ops() && !looping) {
+    showBanner('A new version is available. Reloading...', '', 'Reload now', go);
+    setTimeout(() => { if (!S.board.has_ops()) go(); }, 1200);
+  } else {
+    showBanner('A new version is available - reload. Your unsent edits are kept and restored after the reload.', '', 'Reload', go);
+  }
+}
+async function restorePending() {
+  try {
+    const j = await idb.get('meta', PEND());
+    if (j) { S.board.apply_remote(j); await idb.put('meta', PEND(), ''); }
+  } catch { /* ignore */ }
+}
+async function onServer(m) {
   const b = S.board;
   switch (m.t) {
+    case 'reload': onReload(m); break;
     case 'snap': {
+      S.wsTry = 0;
+      hideBanner();
+      if (!S.restored) { S.restored = true; await restorePending(); }
       S.you = m.you; S.seq = m.seq; S.title = m.title;
       $('doctitle').textContent = m.title;
       document.title = `${m.title} - draw-wasm`;
@@ -673,6 +779,7 @@ function onServer(m) {
       setStatus('Live');
       if (!S.fitted) { S.fitted = true; b.fit(S.w, S.h); }
       lastSent = 0;
+      uploadImages(JSON.parse(b.images_used())); // bytes held only by this browser reach the server
       break;
     }
     case 'ops': S.seq = m.seq; b.apply_remote(JSON.stringify(m.ops)); break;
@@ -831,7 +938,7 @@ async function main() {
     $('btn-name').classList.remove('hidden');
     if (!S.owner && !validName(S.name)) { S.name = ''; S.needName = true; S.stopped = true; nameDialog(true); }
     else connect();
-    window.addEventListener('online', () => { if (!S.wsOpen) { S.wsTry = 0; connect(); } });
+    window.addEventListener('online', () => { if (!S.wsOpen && !S.reloadNeeded && !S.needName) { S.wsTry = 0; connect(); } });
     window.addEventListener('offline', () => { try { S.ws?.close(); } catch {} });
   }
   S.lastDocRev = S.board.doc_rev();

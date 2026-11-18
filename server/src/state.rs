@@ -81,6 +81,8 @@ pub struct App {
     pub docs: tokio::sync::Mutex<HashMap<String, Arc<Active>>>,
     pub next_conn: std::sync::atomic::AtomicU64,
     pub statics: crate::statics::Statics,
+    /// asset version of the deployed web bundle (the client reports its own in the hello)
+    pub build: String,
 }
 
 pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

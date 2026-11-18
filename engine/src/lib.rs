@@ -84,7 +84,6 @@ pub struct Board {
     redo: Vec<Vec<Change>>,
     clip: Vec<Element>,
     clip_src: String,
-    pasted: i32,
     // flags
     need_render: bool,
     doc_rev: u32,
@@ -140,7 +139,6 @@ impl Board {
             redo: vec![],
             clip: vec![],
             clip_src: String::new(),
-            pasted: 0,
             need_render: true,
             doc_rev: 0,
             sel_rev: 0,
@@ -910,7 +908,7 @@ impl Board {
         }
         self.end_tx();
     }
-    fn copies(&mut self, src: Vec<Element>, off: f64) -> Vec<String> {
+    fn copies(&mut self, src: Vec<Element>, dx: f64, dy: f64) -> Vec<String> {
         let map: HashMap<String, String> = src.iter().map(|e| (e.id.clone(), rid())).collect();
         let mut z = self.top_z();
         let mut out = vec![];
@@ -925,14 +923,14 @@ impl Board {
             if e.k == Kind::Arrow {
                 if e.pts.len() >= 4 {
                     for i in 0..4 {
-                        e.pts[i] += off;
+                        e.pts[i] += if i % 2 == 0 { dx } else { dy };
                     }
                 }
                 e.sb = map.get(&e.sb).cloned().unwrap_or_default();
                 e.eb = map.get(&e.eb).cloned().unwrap_or_default();
             } else {
-                e.x += off;
-                e.y += off;
+                e.x += dx;
+                e.y += dy;
             }
             out.push(e.id.clone());
             self.put(e);
@@ -956,7 +954,7 @@ impl Board {
                 e
             })
             .collect();
-        let ids = self.copies(src, 24.0);
+        let ids = self.paste_at(src, None);
         self.set_sel(ids);
     }
     fn clip_of_selection(&self) -> Vec<Element> {
@@ -982,11 +980,13 @@ impl Board {
         let j = serde_json::to_string(&c).unwrap_or_default();
         self.clip = c;
         self.clip_src = j.clone();
-        self.pasted = 0;
         j
     }
-    /// Paste elements from a JSON payload (from the system clipboard). Returns the number pasted.
-    pub fn paste_json(&mut self, json: &str) -> u32 {
+    /// Paste elements from a JSON payload (from the system clipboard). When (sx, sy) is a finite
+    /// screen point the group is centred there, else it is offset by 24px. A paste never lands
+    /// exactly on an existing element of the same kind, so repeated pastes fan out.
+    /// Returns the number of elements pasted.
+    pub fn paste_json(&mut self, json: &str, sx: f64, sy: f64) -> u32 {
         let v: Vec<Element> = match serde_json::from_str(json) {
             Ok(v) => v,
             Err(_) => return 0,
@@ -995,17 +995,51 @@ impl Board {
         if v.is_empty() {
             return 0;
         }
-        if self.clip_src == json {
-            self.pasted += 1;
-        } else {
-            self.clip_src = json.to_string();
-            self.pasted = 1;
-        }
         let n = v.len() as u32;
-        self.clip = v;
-        let ids = self.copies(self.clip.clone(), 24.0 * self.pasted as f64);
+        self.clip_src = json.to_string();
+        self.clip = v.clone();
+        let at = if sx.is_finite() && sy.is_finite() { Some((sx, sy)) } else { None };
+        let ids = self.paste_at(v, at);
         self.set_sel(ids);
         n
+    }
+    fn paste_at(&mut self, src: Vec<Element>, at: Option<(f64, f64)>) -> Vec<String> {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for e in &src {
+            let b = if e.k == Kind::Arrow && e.pts.len() >= 4 {
+                (e.pts[0].min(e.pts[2]), e.pts[1].min(e.pts[3]), e.pts[0].max(e.pts[2]), e.pts[1].max(e.pts[3]))
+            } else {
+                (e.x, e.y, e.x + e.w, e.y + e.h)
+            };
+            x0 = x0.min(b.0);
+            y0 = y0.min(b.1);
+            x1 = x1.max(b.2);
+            y1 = y1.max(b.3);
+        }
+        let (mut dx, mut dy) = match at {
+            Some((sx, sy)) => {
+                let c = self.s2w(sx, sy);
+                (c.0 - (x0 + x1) / 2.0, c.1 - (y0 + y1) / 2.0)
+            }
+            None => (24.0, 24.0),
+        };
+        let first = src.iter().min_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal)).cloned();
+        if let Some(f) = first {
+            let anchor = |e: &Element| if e.k == Kind::Arrow && e.pts.len() >= 2 { (e.pts[0], e.pts[1]) } else { (e.x, e.y) };
+            let a = anchor(&f);
+            let mut guard = 0;
+            while guard < 500
+                && self.els.values().any(|o| {
+                    let p = anchor(o);
+                    !o.del && o.k == f.k && (p.0 - (a.0 + dx)).abs() < 1.0 && (p.1 - (a.1 + dy)).abs() < 1.0
+                })
+            {
+                dx += 24.0;
+                dy += 24.0;
+                guard += 1;
+            }
+        }
+        self.copies(src, dx, dy)
     }
     /// Add a free-standing text label at screen position (sx, sy) with measured size (w, h).
     pub fn add_text(&mut self, text: &str, w: f64, h: f64, sx: f64, sy: f64) {
@@ -1033,8 +1067,7 @@ impl Board {
         if self.clip.is_empty() {
             return;
         }
-        self.pasted += 1;
-        let ids = self.copies(self.clip.clone(), 24.0 * self.pasted as f64);
+        let ids = self.paste_at(self.clip.clone(), None);
         self.set_sel(ids);
     }
     pub fn z_front(&mut self) {
@@ -1177,16 +1210,26 @@ impl Board {
         )
     }
 
-    pub fn add_image(&mut self, hash: &str, w: f64, h: f64, sx: f64, sy: f64) {
+    pub fn add_image(&mut self, hash: &str, w: f64, h: f64, sx: f64, sy: f64) -> String {
         let c = self.s2w(sx, sy);
         let (mut w, mut h) = (w.max(1.0), h.max(1.0));
         let m = 480.0f64.min(480.0 / self.zoom.max(0.3));
         let k = (m / w).min(m / h).min(1.0);
         w *= k;
         h *= k;
+        let (mut x, mut y) = (c.0 - w / 2.0, c.1 - h / 2.0);
+        // repeated adds of the same picture fan out instead of stacking exactly
+        let mut guard = 0;
+        while guard < 500
+            && self.els.values().any(|o| !o.del && o.k == Kind::Image && o.img == hash && (o.x - x).abs() < 1.0 && (o.y - y).abs() < 1.0)
+        {
+            x += 24.0;
+            y += 24.0;
+            guard += 1;
+        }
         let mut e = self.new_el(Kind::Image);
-        e.x = c.0 - w / 2.0;
-        e.y = c.1 - h / 2.0;
+        e.x = x;
+        e.y = y;
         e.w = w;
         e.h = h;
         e.img = hash.to_string();
@@ -1197,7 +1240,8 @@ impl Board {
         self.put(e);
         self.end_tx();
         self.tool = "select".into();
-        self.set_sel(vec![id]);
+        self.set_sel(vec![id.clone()]);
+        id
     }
 
     // ------------------------------------------------------------ history

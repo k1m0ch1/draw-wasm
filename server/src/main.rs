@@ -112,6 +112,7 @@ async fn main() {
         salt,
         docs: Default::default(),
         next_conn: Default::default(),
+        build: statics::build_id(&statics),
         statics,
     });
     tokio::spawn(app.clone().flusher());

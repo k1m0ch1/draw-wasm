@@ -80,9 +80,9 @@ async fn room_owner(app: &App, room: &str, token: &str) -> bool {
 async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, key: String) {
     // 1. hello (must arrive quickly)
     let hello = tokio::time::timeout(Duration::from_secs(10), sock.recv()).await;
-    let (cid, name, token) = match hello {
+    let (cid, name, token, build) = match hello {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(&t) {
-            Ok(ClientMsg::Hello { cid, name, token, .. }) if proto::valid_id(&cid) => (cid, name, token),
+            Ok(ClientMsg::Hello { cid, name, token, build, .. }) if proto::valid_id(&cid) => (cid, name, token, build),
             _ => {
                 send_err(&mut sock, "expected hello").await;
                 return;
@@ -94,6 +94,9 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     let name = match clean_name(&name) {
         Some(n) => n,
         None if is_owner => "Owner".to_string(),
+        // a page older than the name prompt cannot show a dialog: admit it as a guest (it is told to
+        // reload below) instead of rejecting it in a reconnect loop
+        None if build.is_empty() => format!("Guest {}", rand::Rng::gen_range(&mut rand::thread_rng(), 1000..10000)),
         None => {
             send_err(&mut sock, "a display name (1 to 32 characters) is required").await;
             return;
@@ -110,6 +113,10 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     if sock.send(Message::Text(first.as_str().into())).await.is_err() {
         app.leave(&active, conn).await;
         return;
+    }
+
+    if build != app.build && !app.build.is_empty() {
+        let _ = sock.send(Message::Text(encode(&ServerMsg::Reload { build: app.build.clone() }).as_str().into())).await;
     }
 
     let mut ops_bucket = LocalBucket::new(60.0, 30.0);

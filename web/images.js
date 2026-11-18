@@ -1,31 +1,97 @@
-// Image cache (hash -> decoded bitmap). Looks in IndexedDB first, then the server.
+// Image cache (hash -> decoded bitmap) and background uploads.
+// Looks in IndexedDB first, then the server. Loads and uploads retry with backoff.
 import { idb } from './db.js';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
+
 export class Images {
-  constructor() { this.map = new Map(); }
+  constructor() {
+    this.map = new Map(); // hash -> {state: loading|ok|err, img}
+    this.up = new Map(); // hash -> {state: uploading|retrying|ok|failed, msg}
+    this.onChange = () => {};
+    this.running = 0;
+    this.waiting = [];
+  }
   get(hash) { return this.map.get(hash); }
   set(hash, bmp) { this.map.set(hash, { state: 'ok', img: bmp }); }
+  /** Upload state shown on the element ({state, msg}), or undefined when nothing is pending or wrong. */
+  status(hash) {
+    const u = this.up.get(hash);
+    return u && u.state !== 'ok' ? u : undefined;
+  }
   async blob(hash) {
     let b = await idb.get('images', hash).catch(() => null);
     if (b) return b;
     const r = await fetch(`/api/img/${hash}`);
     if (!r.ok) throw new Error('image not found');
     b = await r.blob();
+    idb.put('images', hash, b).catch(() => {}); // keep a local copy (best effort)
     return b;
   }
+  /** Decode an image for drawing. A missing image is retried: its author may still be uploading it. */
   load(hash, done) {
     if (this.map.has(hash)) return;
-    const entry = { state: 'loading', img: null };
+    const entry = { state: 'loading', img: null, tries: 0 };
     this.map.set(hash, entry);
     (async () => {
-      try {
-        const b = await this.blob(hash);
-        entry.img = await createImageBitmap(b);
-        entry.state = 'ok';
-        done();
-      } catch {
-        entry.state = 'err';
-        setTimeout(() => { if (this.map.get(hash) === entry) this.map.delete(hash); }, 4000);
+      for (let i = 0; ; i++) {
+        try {
+          const b = await this.blob(hash);
+          entry.img = await createImageBitmap(b);
+          entry.state = 'ok';
+          done();
+          return;
+        } catch {
+          entry.tries = i + 1;
+          if (i >= 12) break;
+          await sleep(jitter(Math.min(500 * 2 ** i, 8000)));
+        }
+      }
+      entry.state = 'err';
+      done();
+      // look again later: once the entry is dropped the next draw starts a fresh attempt
+      setTimeout(() => { if (this.map.get(hash) === entry) { this.map.delete(hash); done(); } }, 20000);
+    })();
+  }
+  async slot() {
+    if (this.running >= 3) await new Promise((r) => this.waiting.push(r));
+    this.running++;
+  }
+  release() {
+    this.running--;
+    const n = this.waiting.shift();
+    if (n) n();
+  }
+  /** Make sure the server has the bytes of `hash` for this document (idempotent; retries in the background). */
+  upload(hash, url) {
+    const cur = this.up.get(hash);
+    if (cur && cur.state !== 'failed') return;
+    const u = { state: 'uploading', msg: '', tries: 0, missing: 0 };
+    this.up.set(hash, u);
+    this.onChange();
+    (async () => {
+      for (;;) {
+        await this.slot();
+        let permanent = '';
+        try {
+          let blob = null;
+          try { blob = await this.blob(hash); } catch { blob = null; }
+          if (!blob) {
+            u.missing++;
+            if (u.missing >= 8) permanent = 'The image data is not available';
+          } else {
+            const r = await fetch(url, { method: 'POST', body: blob });
+            if (r.ok) { u.state = 'ok'; this.release(); this.onChange(); return; }
+            const j = await r.json().catch(() => ({}));
+            if (r.status !== 429 && r.status !== 408 && r.status < 500) permanent = j.error || `Upload failed (${r.status})`;
+          }
+        } catch { /* network error: retry */ }
+        this.release();
+        if (permanent) { u.state = 'failed'; u.msg = permanent; this.onChange(); return; }
+        u.tries++;
+        if (u.tries >= 2 && u.state !== 'retrying') { u.state = 'retrying'; this.onChange(); }
+        await sleep(jitter(Math.min(1000 * 2 ** Math.min(u.tries, 5), 30000)));
       }
     })();
   }
@@ -44,10 +110,10 @@ const OK_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 export const MAX_EDGE = 2000;
 const MAX_BYTES = 3.9 * 1024 * 1024;
 
-/** Downscale (max edge ~2000px) and re-encode to WebP/JPEG when that is smaller. */
+/** Downscale (max edge ~2000px) and re-encode to WebP/JPEG; shrinks further until it fits the server cap. */
 export async function prepareImage(file) {
   const bmp = await createImageBitmap(file);
-  let { width: w, height: h } = bmp;
+  const w = bmp.width, h = bmp.height;
   let scale = Math.min(1, MAX_EDGE / Math.max(w, h));
   let blob = file;
   const type = OK_TYPES.includes(file.type) ? file.type : '';
@@ -65,14 +131,14 @@ export async function prepareImage(file) {
     if (out && (scale < 1 || !type || out.size < file.size)) blob = out;
   }
   let q = 0.8;
-  while (blob.size > MAX_BYTES && q > 0.25) {
+  for (let i = 0; blob.size > MAX_BYTES && i < 12; i++) {
     scale *= 0.8;
     const out = await encode(scale, q);
     if (!out) break;
     blob = out;
-    q -= 0.1;
+    q = Math.max(0.4, q - 0.1);
   }
-  if (blob.size > MAX_BYTES) throw new Error('Image is too large');
+  if (blob.size > MAX_BYTES) throw new Error('Image is too large even after shrinking');
   const final = blob === file ? bmp : await createImageBitmap(blob);
   const hash = await sha256(blob);
   return { blob, bmp: final, w: final.width, h: final.height, hash };

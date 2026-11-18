@@ -25,6 +25,9 @@ pub enum ClientMsg {
         /// last sequence number seen; the server always answers with a fresh snapshot
         #[serde(default)]
         seq: u64,
+        /// build id of the page the client runs (absent in clients older than the handshake)
+        #[serde(default)]
+        build: String,
     },
     Ops { ops: Vec<Element> },
     Cur { x: f64, y: f64 },
@@ -50,6 +53,8 @@ pub enum ServerMsg {
     Saved { seq: u64 },
     Err { msg: String },
     Deleted,
+    /// The client runs a different build than the server: it should reload the page.
+    Reload { build: String },
 }
 
 /// roomID rules: lowercase [a-z0-9-], 3..32 chars, no leading/trailing hyphen, not reserved.

@@ -60,11 +60,35 @@ export class Gfx {
     this.x.font = `${size}px ${FONT}`;
     return this.x.measureText(s).width;
   }
+  badge(text, x, y, bg) {
+    const c = this.x, s = this.scale;
+    c.save();
+    c.font = `${12 / s}px ${FONT}`;
+    c.textBaseline = 'middle';
+    c.textAlign = 'left';
+    const pw = c.measureText(text).width + 12 / s, ph = 20 / s;
+    c.fillStyle = bg;
+    c.fillRect(x, y, pw, ph);
+    c.fillStyle = '#fff';
+    c.fillText(text, x + 6 / s, y + ph / 2);
+    c.restore();
+  }
   image(hash, x, y, w, h) {
     const c = this.x;
     const e = this.images.get(hash);
     if (e && e.state === 'ok') {
       c.drawImage(e.img, x, y, w, h);
+      const u = this.images.status(hash);
+      if (u && u.state === 'failed') {
+        c.save();
+        c.strokeStyle = '#e03131';
+        c.lineWidth = 3 / this.scale;
+        c.strokeRect(x, y, w, h);
+        c.restore();
+        this.badge('Not shared: ' + u.msg, x, y, '#c92a2a');
+      } else if (u) {
+        this.badge(u.state === 'retrying' ? 'Upload failed, retrying...' : 'Uploading...', x, y, u.state === 'retrying' ? '#e8590c' : '#4f6bed');
+      }
       return;
     }
     // placeholder
@@ -75,6 +99,7 @@ export class Gfx {
     c.lineWidth = 1 / this.scale;
     c.strokeRect(x, y, w, h);
     c.restore();
+    this.badge(e && e.state === 'err' ? 'Image unavailable, retrying...' : 'Loading image...', x, y, e && e.state === 'err' ? '#c92a2a' : '#868e96');
     if (!e) this.images.load(hash, () => this.onImageReady());
   }
 }
