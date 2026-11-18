@@ -61,12 +61,28 @@ async fn send_err(sock: &mut WebSocket, msg: &str) {
     let _ = sock.send(Message::Text(m.as_str().into())).await;
 }
 
+/// True when `token` is the ownership token of `room` (only its hash is stored and compared).
+async fn room_owner(app: &App, room: &str, token: &str) -> bool {
+    if token.len() < 20 || token.len() > 128 || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let hash = crate::limits::sha256_hex(token.as_bytes());
+    let r = room.to_string();
+    let stored: Option<Option<String>> = app
+        .db
+        .call(move |c| {
+            c.query_row("SELECT owner_hash FROM rooms WHERE id=?1", rusqlite::params![r], |row| row.get::<_, String>(0)).ok()
+        })
+        .await;
+    matches!(stored, Some(Some(s)) if crate::limits::ct_eq(&s, &hash))
+}
+
 async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, key: String) {
     // 1. hello (must arrive quickly)
     let hello = tokio::time::timeout(Duration::from_secs(10), sock.recv()).await;
-    let (cid, name) = match hello {
+    let (cid, name, token) = match hello {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(&t) {
-            Ok(ClientMsg::Hello { cid, name, .. }) if proto::valid_id(&cid) => (cid, name),
+            Ok(ClientMsg::Hello { cid, name, token, .. }) if proto::valid_id(&cid) => (cid, name, token),
             _ => {
                 send_err(&mut sock, "expected hello").await;
                 return;
@@ -74,10 +90,18 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
         },
         _ => return,
     };
-    let name = clean_name(&name).unwrap_or_else(random_name);
+    let is_owner = room_owner(&app, &room, &token).await;
+    let name = match clean_name(&name) {
+        Some(n) => n,
+        None if is_owner => "Owner".to_string(),
+        None => {
+            send_err(&mut sock, "a display name (1 to 32 characters) is required").await;
+            return;
+        }
+    };
     let conn = app.next_conn.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::channel::<Arc<String>>(512);
-    let peer = Peer { id: cid.clone(), name, color: random_color() };
+    let peer = Peer { id: cid.clone(), name, color: random_color(), owner: is_owner };
     let Some((active, snap)) = app.join(&room, &nano, conn, Client { peer, tx: tx.clone() }).await else {
         send_err(&mut sock, "document not found").await;
         return;

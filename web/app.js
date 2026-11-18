@@ -22,6 +22,8 @@ const rnd = (n) => {
   return [...a].map((b) => al[b % 36]).join('');
 };
 
+const CLIP_PREFIX = 'draw-wasm:clip:v1:';
+
 // ---------------------------------------------------------------- routing
 const parts = location.pathname.split('/').filter(Boolean);
 const route = parts.length === 0 ? { kind: 'local' }
@@ -34,7 +36,7 @@ const S = {
   canvas: $('cv'), w: 0, h: 0, dpr: 1,
   dirty: false, saving: false, idleMs: 60000, idleTimer: null, lastDocRev: 0, lastSelRev: -1,
   ws: null, wsOpen: false, wsTry: 0, you: null, peers: new Map(), cursors: new Map(),
-  seq: 0, owner: false, title: '', lastPing: 0, stopped: false,
+  seq: 0, owner: false, token: '', name: '', needName: false, title: '', lastPing: 0, stopped: false,
   spaceDown: false, pointers: new Map(), pan: null, pinch: null, editing: null,
   lastCursorSent: 0, netWrites: 0,
 };
@@ -424,14 +426,37 @@ function bindInput() {
     const p = localPos(e);
     for (const [i, f] of files.entries()) await addImageFile(f, [p[0] + i * 24, p[1] + i * 24]);
   });
+  // Copy/cut put the selected elements on the SYSTEM clipboard (replacing whatever was there).
+  const typing = () => S.editing || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || !$('modal').classList.contains('hidden');
+  const copyEvt = (cut) => (e) => {
+    if (typing() || !S.board) return;
+    const j = S.board.copy_json();
+    if (!j) return;
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', CLIP_PREFIX + j);
+    if (cut) S.board.delete_selected();
+    toast(cut ? 'Cut' : 'Copied', 900);
+  };
+  document.addEventListener('copy', copyEvt(false));
+  document.addEventListener('cut', copyEvt(true));
   document.addEventListener('paste', async (e) => {
-    if (S.editing || /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)) return;
-    const items = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/'));
-    if (items.length) {
+    if (typing()) return;
+    const cd = e.clipboardData;
+    const text = cd?.getData('text/plain') || '';
+    if (text.startsWith(CLIP_PREFIX)) { // elements copied from this app (any document or tab)
       e.preventDefault();
-      for (const it of items) { const f = it.getAsFile(); if (f) await addImageFile(f); }
-    } else {
-      S.board.paste();
+      S.board.paste_json(text.slice(CLIP_PREFIX.length));
+      return;
+    }
+    const files = [...(cd?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/'));
+    if (files.length) {
+      e.preventDefault();
+      for (const it of files) { const f = it.getAsFile(); if (f) await addImageFile(f); }
+    } else if (text.trim()) { // plain text from elsewhere becomes a text label
+      e.preventDefault();
+      const t = text.slice(0, 2000);
+      const [w, h] = textSize(t, S.board.default_fs());
+      S.board.add_text(t, w, h, S.w / 2, S.h / 2);
     }
   });
   $('filepick').addEventListener('change', async (e) => {
@@ -455,8 +480,7 @@ function onKey(e) {
     else if (k === 'y') { e.preventDefault(); b.redo(); }
     else if (k === 'a') { e.preventDefault(); b.select_all(); }
     else if (k === 'd') { e.preventDefault(); b.duplicate(); }
-    else if (k === 'c') { b.copy(); }
-    else if (k === 'x') { b.copy(); b.delete_selected(); }
+    // c / x / v are handled by the copy, cut and paste events (system clipboard)
     else if (k === 's') { e.preventDefault(); doSave(); }
     else if (k === '0') { e.preventDefault(); b.set_zoom(S.w / 2, S.h / 2, 1); }
     return;
@@ -487,6 +511,7 @@ function bindButtons() {
   $('btn-save').onclick = () => doSave();
   $('btn-cloud').onclick = () => cloudDialog();
   $('btn-share').onclick = () => shareDialog();
+  $('btn-name').onclick = () => nameDialog(false);
   $('btn-del').onclick = () => deleteDocDialog();
   $('btn-style').onclick = () => $('style').classList.toggle('open');
   window.addEventListener('resize', resize);
@@ -533,6 +558,7 @@ async function api(method, path, body, room) {
 function cloudDialog() {
   const room = el('input', { id: 'cloud-room', type: 'text', value: randomRoom(), maxlength: '32', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Room ID' });
   const title = el('input', { id: 'cloud-title', type: 'text', value: 'Untitled', maxlength: '80', 'aria-label': 'Document title' });
+  const yname = el('input', { id: 'cloud-name', type: 'text', value: S.name || 'Owner', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name' });
   const msg = el('div', { class: 'msg', id: 'cloud-msg' });
   const go = el('button', { class: 'pill primary', id: 'cloud-go' }, 'Make public and store');
   const cancel = el('button', { class: 'pill', id: 'cloud-cancel' }, 'Cancel');
@@ -542,6 +568,9 @@ function cloudDialog() {
   go.onclick = async () => {
     go.disabled = true;
     msg.textContent = '';
+    const nm = yname.value.trim().replace(/\s+/g, ' ');
+    if (!validName(nm)) { msg.textContent = 'Your name must be 1 to 32 letters, digits, spaces, - _ . or ''; go.disabled = false; return; }
+    await idb.put('meta', 'name', nm).catch(() => {});
     try { await cloudStore(room.value.trim(), title.value.trim(), msg); }
     catch (e) { msg.textContent = e.message || 'Something went wrong'; go.disabled = false; }
   };
@@ -549,7 +578,8 @@ function cloudDialog() {
     el('h2', {}, 'Store on cloud'),
     el('p', { class: 'warn', id: 'cloud-warning' }, 'Cloud documents are PUBLIC. Anyone who has the link can view and edit this document and its images, and anyone can open the room page. Do not store anything private.'),
     el('label', {}, 'Room ID (first come, first served)'), room, dice,
-    el('label', {}, 'Title'), title, msg,
+    el('label', {}, 'Title'), title,
+    el('label', {}, 'Your name (shown to others as the room owner)'), yname, msg,
     el('div', { class: 'actions' }, cancel, go)));
 }
 async function cloudStore(roomId, title, msg) {
@@ -606,7 +636,7 @@ function connect() {
   setStatus(S.wsTry ? 'Reconnecting...' : 'Connecting...');
   ws.onopen = () => {
     S.wsTry = 0;
-    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: '', seq: S.seq }));
+    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: S.name, token: S.token, seq: S.seq }));
     clearInterval(S.pingT);
     S.pingT = setInterval(() => wsSend({ t: 'ping' }), 25000);
   };
@@ -650,7 +680,9 @@ function onServer(m) {
     case 'gone': S.peers.delete(m.id); S.cursors.delete(m.id); renderPeers(); positionCursors(); break;
     case 'cur': S.cursors.set(m.id, { x: m.x, y: m.y, t: performance.now() }); positionCursors(); break;
     case 'saved': setStatus('Saved to the cloud'); setTimeout(() => S.wsOpen && setStatus('Live'), 2000); break;
-    case 'err': toast(m.msg); break;
+    case 'err':
+      if (/display name/.test(m.msg)) { S.needName = true; S.stopped = true; nameDialog(true); } else toast(m.msg);
+      break;
     case 'deleted': S.stopped = true; toast('This document was deleted by the room owner'); setTimeout(() => location.assign('/' + route.room), 1500); break;
     default: break;
   }
@@ -663,13 +695,41 @@ function sendCursor(p) {
   const w = S.board.w2s(0, 0), z = S.board.zoom();
   wsSend({ t: 'cur', x: (p[0] - w[0]) / z, y: (p[1] - w[1]) / z });
 }
+const NAME_RE = /^[\p{L}\p{N} _.'-]+$/u;
+function validName(n) { return n.length >= 1 && n.length <= 32 && NAME_RE.test(n); }
+/** Ask for a display name. `required` = cannot be dismissed (first join). */
+function nameDialog(required) {
+  const inp = el('input', { id: 'name-input', type: 'text', value: S.name || '', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name', placeholder: 'Your name' });
+  const msg = el('div', { class: 'msg', id: 'name-msg' });
+  const go = el('button', { class: 'pill primary', id: 'name-go' }, required ? 'Join' : 'Save');
+  const submit = async () => {
+    const n = inp.value.trim().replace(/\s+/g, ' ');
+    if (!validName(n)) { msg.textContent = 'Enter a name of 1 to 32 letters, digits, spaces, - _ . or ''; return; }
+    S.name = n;
+    await idb.put('meta', 'name', n).catch(() => {});
+    const wasStopped = S.needName;
+    S.needName = false;
+    closeModal();
+    if (wasStopped) { S.stopped = false; S.wsTry = 0; connect(); }
+    else if (S.ws) { try { S.ws.close(); } catch {} S.wsTry = 0; } // reconnect under the new name
+  };
+  go.onclick = submit;
+  inp.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') submit(); });
+  const actions = el('div', { class: 'actions' });
+  if (!required) { const c = el('button', { class: 'pill', id: 'name-cancel' }, 'Cancel'); c.onclick = closeModal; actions.append(c); }
+  actions.append(go);
+  modal(el('div', {}, el('h2', {}, required ? 'Pick a name to join' : 'Change your name'),
+    el('p', {}, 'Other people in this document see this name next to your cursor.'), inp, msg, actions));
+  const m = $('modal');
+  if (required) m.onclick = null;
+}
 function renderPeers() {
   const box = $('peers');
   box.replaceChildren();
   const list = [...S.peers.values()];
   if (S.you) list.unshift({ ...S.you, me: true });
   for (const p of list.slice(0, 8)) {
-    const d = el('span', { class: 'peer', title: p.name + (p.me ? ' (you)' : '') });
+    const d = el('span', { class: 'peer' + (p.owner ? ' owner' : ''), title: p.name + (p.owner ? ' (owner)' : '') + (p.me ? ' (you)' : '') });
     d.style.background = /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#888';
     d.textContent = (p.name || '?').slice(0, 1).toUpperCase();
     d.dataset.peer = p.id;
@@ -693,7 +753,7 @@ function positionCursors() {
       layer.append(d);
     }
     d.style.color = /^#[0-9a-f]{6}$/i.test(peer.color) ? peer.color : '#888';
-    d.lastChild.textContent = peer.name;
+    d.lastChild.textContent = (peer.owner ? '★ ' : '') + peer.name;
     const s = S.board.w2s(c.x, c.y);
     d.style.transform = `translate(${s[0]}px, ${s[1]}px)`;
   }
@@ -760,11 +820,15 @@ async function main() {
     try {
       const room = await api('GET', `/api/rooms/${route.room}`, undefined, route.room);
       S.owner = !!room.owner;
+      if (S.owner) S.token = (await token(route.room)) || '';
       $('btn-del').classList.toggle('hidden', !S.owner);
       const crumb = el('a', { href: '/' + route.room, id: 'roomlink' }, route.room);
       $('doctitle').before(crumb, el('span', { class: 'slash' }, '/'));
     } catch { /* room page link is optional */ }
-    connect();
+    S.name = (await idb.get('meta', 'name').catch(() => '')) || '';
+    $('btn-name').classList.remove('hidden');
+    if (!S.owner && !validName(S.name)) { S.name = ''; S.needName = true; S.stopped = true; nameDialog(true); }
+    else connect();
     window.addEventListener('online', () => { if (!S.wsOpen) { S.wsTry = 0; connect(); } });
     window.addEventListener('offline', () => { try { S.ws?.close(); } catch {} });
   }

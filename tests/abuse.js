@@ -50,7 +50,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   const ws = await open(`/ws/${R}/${d.nano}`);
   ok(!!ws, 'ws connects');
   const msgs = []; ws.onmessage = (e) => msgs.push(JSON.parse(e.data));
-  ws.send(JSON.stringify({ t: 'hello', cid: 'abuse1' })); await sleep(500);
+  ws.send(JSON.stringify({ t: 'hello', cid: 'abuse1', name: 'Abuse One' })); await sleep(500);
   ok(msgs[0] && msgs[0].t === 'snap', 'snapshot on hello');
   ws.send('{broken'); await sleep(200); ok(msgs.some((m) => m.t === 'err'), 'malformed ws json -> err, still open');
   ws.send(JSON.stringify({ t: 'ops', ops: [{ id: 'x1', v: 1, by: 'abuse1', k: 'rect', x: 1e30 }] })); await sleep(200);
@@ -61,7 +61,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ws.send('x'.repeat(2 * 1024 * 1024)); await sleep(800);
   ok(closed, 'oversized frame closes the socket');
   const ws2 = await open(`/ws/${R}/${d.nano}`); ws2.onmessage = (e) => msgs.push(JSON.parse(e.data));
-  ws2.send(JSON.stringify({ t: 'hello', cid: 'abuse2' })); await sleep(300);
+  ws2.send(JSON.stringify({ t: 'hello', cid: 'abuse2', name: 'Abuse Two' })); await sleep(300);
   const before = msgs.filter((m) => m.t === 'err').length;
   for (let i = 0; i < 300; i++) ws2.send(JSON.stringify({ t: 'ops', ops: [{ id: 'f' + i, v: 1, by: 'abuse2', k: 'rect', x: 1, y: 1, w: 5, h: 5 }] }));
   await sleep(1500);
@@ -69,7 +69,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ws2.close();
   r = await fetch(BASE + '/ws/' + R + '/short'); ok(r.status >= 400 && r.status < 500, 'ws bad doc id 4xx ' + r.status);
   // non-existent doc ws
-  const ws3 = await open(`/ws/${R}/AAAAAAAAAA`); let em = []; if (ws3) { ws3.onmessage = (e) => em.push(JSON.parse(e.data)); ws3.send(JSON.stringify({ t: 'hello', cid: 'q1' })); await sleep(500); }
+  const ws3 = await open(`/ws/${R}/AAAAAAAAAA`); let em = []; if (ws3) { ws3.onmessage = (e) => em.push(JSON.parse(e.data)); ws3.send(JSON.stringify({ t: 'hello', cid: 'q1', name: 'Q One' })); await sleep(500); }
   ok(!ws3 || em.some((m) => m.t === 'err'), 'ws to unknown doc refused');
   // API rate limit
   const rs = await Promise.all(Array.from({ length: 200 }, () => fetch(BASE + `/api/rooms/${R}`))); const n429 = rs.filter((x) => x.status === 429).length;

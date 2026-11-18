@@ -291,34 +291,26 @@ impl App {
     }
 }
 
-const ADJ: &[&str] = &[
-    "Brave", "Calm", "Clever", "Cosmic", "Curious", "Daring", "Eager", "Fuzzy", "Gentle", "Happy", "Jolly",
-    "Kind", "Lucky", "Merry", "Nimble", "Polite", "Quick", "Quiet", "Sunny", "Swift", "Witty", "Zesty",
-];
-const ANIMAL: &[&str] = &[
-    "Otter", "Fox", "Panda", "Koala", "Falcon", "Gecko", "Heron", "Lynx", "Manatee", "Narwhal", "Owl",
-    "Penguin", "Quokka", "Raven", "Seal", "Tiger", "Walrus", "Yak", "Zebra", "Badger", "Beaver", "Dolphin",
-];
 const COLORS: &[&str] = &[
     "#e8590c", "#2f9e44", "#1c7ed6", "#ae3ec9", "#e03131", "#0c8599", "#f08c00", "#5c7cfa", "#d6336c", "#37b24d",
 ];
 
-pub fn random_name() -> String {
-    let mut r = rand::thread_rng();
-    format!("{} {}", ADJ[r.gen_range(0..ADJ.len())], ANIMAL[r.gen_range(0..ANIMAL.len())])
-}
 pub fn random_color() -> String {
     COLORS[rand::thread_rng().gen_range(0..COLORS.len())].to_string()
 }
 
+/// Display name rules: trimmed, 1..=32 characters, no control characters, only letters, digits,
+/// spaces and a few punctuation marks. Returns None when invalid.
 pub fn clean_name(s: &str) -> Option<String> {
-    let t: String = s.chars().filter(|c| c.is_alphanumeric() || *c == ' ').take(24).collect();
-    let t = t.trim().to_string();
-    if t.len() < 2 {
-        None
-    } else {
-        Some(t)
+    let t = s.trim();
+    let n = t.chars().count();
+    if n == 0 || n > 32 {
+        return None;
     }
+    if !t.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | ''')) {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 pub fn nanoid() -> String {

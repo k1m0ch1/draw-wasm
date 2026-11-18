@@ -76,3 +76,5 @@ button:disabled{opacity:.4;cursor:default}
   #zoombar{left:6px;bottom:8px;right:6px;justify-content:center}
   #style{display:none;right:6px;left:6px;width:auto;top:auto;bottom:112px;max-height:40vh}
   #style.open{display:blo
+.peer.owner{box-shadow:0 0 0 2px #f08c00}
+#modal input[type=text]{width:100%}

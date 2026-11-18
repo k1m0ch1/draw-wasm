@@ -24,11 +24,15 @@ function makePng(w, h) {
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 const png = makePng(60, 40);
-async function open(browser, url) {
+async function open(browser, url, name) {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 760 } });
   const p = await ctx.newPage();
   await p.goto(url);
   await p.waitForFunction(() => window.__draw && window.__draw.board);
+  if (name) { // non-owner joining a cloud doc must give a name first
+    await p.waitForSelector('#name-input', { timeout: 10000 });
+    await p.fill('#name-input', name); await p.click('#name-go');
+  }
   return [ctx, p];
 }
 (async () => {
@@ -57,7 +61,7 @@ async function open(browser, url) {
   ok((await A.textContent('#cloud-msg')).toLowerCase().includes('reserved'), 'reserved room rejected');
   await A.fill('#cloud-room', 'Bad_Room!'); await A.click('#cloud-go'); await sleep(500);
   ok((await A.textContent('#cloud-msg')).length > 0, 'invalid room rejected');
-  await A.fill('#cloud-room', ROOM); await A.fill('#cloud-title', '<img src=x onerror=alert(1)>');
+  await A.fill('#cloud-name', 'Olive'); await A.fill('#cloud-room', ROOM); await A.fill('#cloud-title', '<img src=x onerror=alert(1)>');
   await A.click('#cloud-go');
   await A.waitForURL(new RegExp('/' + ROOM + '/[A-Za-z0-9_-]{10}$'), { timeout: 15000 });
   const url = A.url();
@@ -65,7 +69,7 @@ async function open(browser, url) {
   await A.waitForFunction(() => window.__draw.wsOpen); await sleep(500);
   ok((await sum(A)).length === 3, 'cloud doc keeps 3 elements in A');
   // fresh context
-  const [ctxB, B] = await open(browser, url);
+  const [ctxB, B] = await open(browser, url, 'Bea B');
   await B.waitForFunction(() => window.__draw.wsOpen); await sleep(1000);
   ok((await dig(A)) === (await dig(B)), 'fresh browser loads identical doc');
   const imgsOk = await B.evaluate(() => [...window.__draw.images.map.values()].filter((e) => e.state === 'ok').length);
@@ -85,9 +89,16 @@ async function open(browser, url) {
   const peersA = await A.evaluate(() => document.querySelectorAll('#peers .peer').length);
   const curA = await A.evaluate(() => document.querySelectorAll('#cursors .rcursor').length);
   ok(peersA === 2 && curA >= 1, `presence: ${peersA} peers, ${curA} remote cursor(s)`);
+  const names = await A.evaluate(() => [...document.querySelectorAll('#cursors .rcursor')].map((d) => d.textContent));
+  ok(names.some((n) => n.includes('Bea B')), 'cursor shows chosen name: ' + names.join('|'));
+  const ownerMark = await B.evaluate(() => [...document.querySelectorAll('#cursors .rcursor')].map((d) => d.textContent));
+  await A.mouse.move(300, 300); await A.mouse.move(320, 330); await sleep(500);
+  const ownerSeen = await B.evaluate(() => [...document.querySelectorAll('#cursors .rcursor')].map((d) => d.textContent));
+  ok(ownerSeen.some((n) => n.includes('Olive') && n.includes('★')), 'owner cursor marked: ' + ownerSeen.join('|'));
+  ok(await B.evaluate(() => !!document.querySelector('#peers .peer.owner')), 'owner avatar marked');
   await A.screenshot({ path: SHOTS + '/cloud-A.png' });
   // late joiner
-  const [ctxC, C] = await open(browser, url);
+  const [ctxC, C] = await open(browser, url, 'Cy C');
   await C.waitForFunction(() => window.__draw.wsOpen); await sleep(800);
   const [sa, sc] = [await sum(A), await sum(C)];
   ok((await dig(C)) === (await dig(A)) && sc.length === 5, 'late joiner gets full state');

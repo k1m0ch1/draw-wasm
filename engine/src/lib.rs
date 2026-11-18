@@ -83,6 +83,7 @@ pub struct Board {
     undo: Vec<Vec<Change>>,
     redo: Vec<Vec<Change>>,
     clip: Vec<Element>,
+    clip_src: String,
     pasted: i32,
     // flags
     need_render: bool,
@@ -138,6 +139,7 @@ impl Board {
             undo: vec![],
             redo: vec![],
             clip: vec![],
+            clip_src: String::new(),
             pasted: 0,
             need_render: true,
             doc_rev: 0,
@@ -957,11 +959,11 @@ impl Board {
         let ids = self.copies(src, 24.0);
         self.set_sel(ids);
     }
-    pub fn copy(&mut self) {
-        self.clip = self
-            .sel
+    fn clip_of_selection(&self) -> Vec<Element> {
+        self.sel
             .iter()
             .filter_map(|i| self.els.get(i).cloned())
+            .filter(|e| !e.del)
             .map(|mut e| {
                 if e.k == Kind::Arrow {
                     let (s, t) = arrow_ends(&self.els, &e);
@@ -969,8 +971,63 @@ impl Board {
                 }
                 e
             })
-            .collect();
+            .collect()
+    }
+    /// Copy the selection; returns it as JSON for the system clipboard ("" when nothing is selected).
+    pub fn copy_json(&mut self) -> String {
+        let c = self.clip_of_selection();
+        if c.is_empty() {
+            return String::new();
+        }
+        let j = serde_json::to_string(&c).unwrap_or_default();
+        self.clip = c;
+        self.clip_src = j.clone();
         self.pasted = 0;
+        j
+    }
+    /// Paste elements from a JSON payload (from the system clipboard). Returns the number pasted.
+    pub fn paste_json(&mut self, json: &str) -> u32 {
+        let v: Vec<Element> = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+        let v: Vec<Element> = v.into_iter().filter(|e| !e.del && e.validate().is_ok()).take(2000).collect();
+        if v.is_empty() {
+            return 0;
+        }
+        if self.clip_src == json {
+            self.pasted += 1;
+        } else {
+            self.clip_src = json.to_string();
+            self.pasted = 1;
+        }
+        let n = v.len() as u32;
+        self.clip = v;
+        let ids = self.copies(self.clip.clone(), 24.0 * self.pasted as f64);
+        self.set_sel(ids);
+        n
+    }
+    /// Add a free-standing text label at screen position (sx, sy) with measured size (w, h).
+    pub fn add_text(&mut self, text: &str, w: f64, h: f64, sx: f64, sy: f64) {
+        let text: String = text.chars().take(proto::MAX_TEXT_BYTES / 4).collect();
+        if text.trim().is_empty() {
+            return;
+        }
+        let c = self.s2w(sx, sy);
+        let mut e = self.new_el(Kind::Text);
+        e.x = c.0;
+        e.y = c.1;
+        e.w = w.max(10.0);
+        e.h = h.max(self.fs);
+        e.tx = text;
+        let id = e.id.clone();
+        self.begin_tx();
+        self.put(e);
+        self.end_tx();
+        self.set_sel(vec![id]);
+    }
+    pub fn default_fs(&self) -> f64 {
+        self.fs
     }
     pub fn paste(&mut self) {
         if self.clip.is_empty() {

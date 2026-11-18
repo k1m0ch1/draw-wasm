@@ -8,6 +8,8 @@ pub struct Peer {
     pub id: String,
     pub name: String,
     pub color: String,
+    #[serde(default)]
+    pub owner: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -17,6 +19,9 @@ pub enum ClientMsg {
         cid: String,
         #[serde(default)]
         name: String,
+        /// room ownership token (optional); the server only compares its hash
+        #[serde(default)]
+        token: String,
         /// last sequence number seen; the server always answers with a fresh snapshot
         #[serde(default)]
         seq: u64,
