@@ -1,0 +1,36 @@
+name: draw
+services:
+  draw-app:
+    container_name: draw-app
+    build: .
+    image: draw-app:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    ports:
+      - "127.0.0.1:8190:8080"
+    volumes:
+      - draw_data:/data
+    healthcheck:
+      test: ["CMD", "/app/draw-server", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  draw_data:
+    name: draw_data

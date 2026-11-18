@@ -1,0 +1,8 @@
+target
+dist
+node_modules
+.git
+.deploy.env
+.env*
+*.db*
+engine/pkg
