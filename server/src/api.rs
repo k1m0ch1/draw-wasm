@@ -134,11 +134,11 @@ pub async fn claim_room(
     body: Bytes,
 ) -> Res {
     let k = general(&app, &peer, &h)?;
-    rate(&app, &k, "claim", 5.0, 0.05)?;
     let req: ClaimReq = serde_json::from_slice(&body).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid request"))?;
     if let Some(e) = bad_room(&req.room) {
         return Err(e);
     }
+    rate(&app, &k, "claim", 8.0, 0.05)?;
     let mut raw = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut raw);
     let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
