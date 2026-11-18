@@ -118,10 +118,14 @@ const allUploaded = () => JSON.parse(window.__draw.board.images_used()).every((h
   ok(true, 'page auto-reloaded onto the new build and reconnected');
   const [ctxS2, S2] = await ctxOpen(browser, url, 'Stu S');
   await S2.waitForFunction(() => window.__draw.wsOpen);
+  await ctxS2.setOffline(true);
   await S2.evaluate(() => { window.__draw.build = 'oldbuild01'; window.__draw.ws.close(); });
   await S2.click('#toolbar [data-tool="ellipse"]');
   await S2.mouse.move(700, 300); await S2.mouse.down(); await S2.mouse.move(780, 360); await S2.mouse.up();
   const n0 = (await sum(S2)).length;
+  await ctxS2.setOffline(false);
+  await S2.evaluate(() => { window.__draw.wsTry = 0; });
+  await S2.evaluate(() => window.dispatchEvent(new Event('online')));
   await S2.waitForFunction(() => /reload/i.test(document.getElementById('banner').textContent) && !document.getElementById('banner').classList.contains('hidden'), null, { timeout: 15000 });
   await sleep(2500);
   ok(S2.url() === url && (await S2.evaluate(() => window.__draw.build)) === 'oldbuild01', 'no auto reload while unsent edits exist; banner offers a reload');

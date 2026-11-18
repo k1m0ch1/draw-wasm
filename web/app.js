@@ -196,7 +196,7 @@ function frame() {
 }
 let lastSent = 0;
 function flushOps() {
-  if (route.kind !== 'doc' || !S.wsOpen || !S.board.has_ops()) return;
+  if (route.kind !== 'doc' || !S.wsOpen || S.reloadNeeded || !S.board.has_ops()) return;
   const now = performance.now();
   if (now - lastSent < 40) return;
   lastSent = now;
@@ -766,6 +766,7 @@ async function onServer(m) {
   switch (m.t) {
     case 'reload': onReload(m); break;
     case 'snap': {
+      if (S.reloadNeeded) break; // outdated build: keep local state untouched until the reload
       S.wsTry = 0;
       hideBanner();
       if (!S.restored) { S.restored = true; await restorePending(); }

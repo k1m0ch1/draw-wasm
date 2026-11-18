@@ -109,14 +109,15 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
         send_err(&mut sock, "document not found").await;
         return;
     };
+    // tell a client on another build first, so it can keep its unsent edits; it still gets the snapshot
+    if build != app.build && !app.build.is_empty() {
+        let _ = sock.send(Message::Text(encode(&ServerMsg::Reload { build: app.build.clone() }).as_str().into())).await;
+    }
+
     let first = encode(&snap);
     if sock.send(Message::Text(first.as_str().into())).await.is_err() {
         app.leave(&active, conn).await;
         return;
-    }
-
-    if build != app.build && !app.build.is_empty() {
-        let _ = sock.send(Message::Text(encode(&ServerMsg::Reload { build: app.build.clone() }).as_str().into())).await;
     }
 
     let mut ops_bucket = LocalBucket::new(60.0, 30.0);
