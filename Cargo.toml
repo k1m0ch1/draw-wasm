@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["proto", "engine", "server"]
+
+# Size-first profile used for the WASM engine.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The server is built with this profile: a panic in one task must never take the process down.
+[profile.server]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 8
+panic = "unwind"
+strip = true

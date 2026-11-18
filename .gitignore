@@ -1,0 +1,16 @@
+target/
+node_modules/
+dist/
+engine/pkg/
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.db*
+*.sqlite*
+*.pem
+*.key
+.deploy.env
+*.log
+.DS_Store
