@@ -8,6 +8,6 @@ cd "$(dirname "$0")/.."
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "+ $*"; else "$@"; fi; }
 run ssh "$DEPLOY_SSH" "mkdir -p $DEPLOY_DIR/src"
 run rsync -az --delete --exclude .git --exclude target --exclude dist --exclude node_modules ./ "$DEPLOY_SSH:$DEPLOY_DIR/src/"
-run ssh "$DEPLOY_SSH" "cd $DEPLOY_DIR/src && PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-} nice -n 19 docker compose -p draw up -d --build"
+run ssh "$DEPLOY_SSH" "cd $DEPLOY_DIR/src && OLD=\$(docker images -q draw-app:latest) && PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-} nice -n 19 docker compose -p draw up -d --build && NEW=\$(docker images -q draw-app:latest) && { [ -z \"\$OLD\" ] || [ \"\$OLD\" = \"\$NEW\" ] || docker rmi \"\$OLD\" || true; }"
 sed "s/@@HOST@@/$DEPLOY_HOST/g" deploy/nginx.conf.template > /tmp/draw-vhost.rendered
 echo "Rendered vhost at /tmp/draw-vhost.rendered; install it as /etc/nginx/sites-available/$DEPLOY_HOST, run nginx -t, then reload."

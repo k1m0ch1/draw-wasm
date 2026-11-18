@@ -66,7 +66,7 @@ pub fn valid_room(s: &str) -> Result<(), &'static str> {
 
 pub const RESERVED: &[&str] = &[
     "api", "ws", "assets", "static", "admin", "healthz", "health", "new", "draw", "app", "robots",
-    "favicon", "index", "login", "logout", "signup", "register", "root", "null", "undefined",
+    "favicon", "dist", "index", "login", "logout", "signup", "register", "root", "null", "undefined",
     "www", "mail", "docs", "doc", "room", "rooms", "img", "image", "images", "public", "private",
     "settings", "status", "metrics", "sitemap", "manifest", "sw", "support", "help", "about",
     "terms", "privacy", "system", "config", "local", "download", "upload",
