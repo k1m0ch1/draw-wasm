@@ -752,7 +752,9 @@ function positionCursors() {
       d.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 1l12 5-5 2-2 5z" fill="currentColor" stroke="#fff" stroke-width="1"/></svg><span></span>';
       layer.append(d);
     }
-    d.style.color = /^#[0-9a-f]{6}$/i.test(peer.color) ? peer.color : '#888';
+    const pc = /^#[0-9a-f]{6}$/i.test(peer.color) ? peer.color : '#888';
+    d.style.color = pc;
+    d.lastChild.style.background = pc;
     d.lastChild.textContent = (peer.owner ? '★ ' : '') + peer.name;
     const s = S.board.w2s(c.x, c.y);
     d.style.transform = `translate(${s[0]}px, ${s[1]}px)`;
