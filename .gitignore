@@ -14,3 +14,5 @@ engine/pkg/
 .deploy.env
 *.log
 .DS_Store
+*.png
+!web/**/*.png
