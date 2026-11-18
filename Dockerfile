@@ -6,7 +6,8 @@ ARG BINARYEN_VERSION=version_123
 ENV CARGO_BUILD_JOBS=2 CARGO_NET_RETRY=5
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates curl && rm -rf /var/lib/apt/lists/*
 # distro binaryen is too old for current rustc output; use an upstream release
-RUN curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz | tar -xz -C /opt \n && ln -s /opt/binaryen-${BINARYEN_VERSION}/bin/wasm-opt /usr/local/bin/wasm-opt && wasm-opt --version
+RUN curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz | tar -xz -C /opt \
+ && ln -s /opt/binaryen-${BINARYEN_VERSION}/bin/wasm-opt /usr/local/bin/wasm-opt && wasm-opt --version
 RUN rustup target add wasm32-unknown-unknown \
  && nice -n 19 cargo install wasm-bindgen-cli --version ${WASM_BINDGEN_VERSION} --locked
 WORKDIR /src
