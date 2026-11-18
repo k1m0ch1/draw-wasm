@@ -281,7 +281,7 @@ function startEdit(id) {
     if (ev.key === 'Escape') { ev.preventDefault(); commitEdit(); }
     else if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); commitEdit(); }
   });
-  ta.addEventListener('blur', () => setTimeout(commitEdit, 0));
+  ta.addEventListener('blur', () => setTimeout(() => { if (S.editing && S.editing.ta === ta) commitEdit(); }, 0));
   layoutEditor();
   ta.focus();
   ta.select();
