@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>draw-wasm</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/@@V@@/style.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv" tabindex="0" aria-label="Whiteboard canvas"></canvas>
+  <div id="cursors"></div>
+  <div id="editlayer"></div>
+</div>
+
+<header id="topbar">
+  <a id="brand" href="/" title="Home"><span class="logo"></span><span class="brandname">draw</span></a>
+  <span id="doctitle"></span>
+  <span id="status" role="status"></span>
+  <span class="spacer"></span>
+  <span id="peers" aria-label="People here"></span>
+  <button id="btn-share" class="pill hidden" title="Share link">Share</button>
+  <button id="btn-save" class="pill" title="Save (Ctrl+S)">Save</button>
+  <button id="btn-cloud" class="pill primary" title="Store this document on the server">Store on cloud</button>
+  <button id="btn-del" class="pill danger hidden" title="Delete this document (room owner)">Delete</button>
+</header>
+
+<nav id="toolbar" aria-label="Tools"></nav>
+<aside id="style" aria-label="Style"></aside>
+<button id="btn-style" class="fab" aria-label="Style">Style</button>
+
+<div id="zoombar">
+  <button id="btn-undo" title="Undo (Ctrl+Z)" aria-label="Undo"></button>
+  <button id="btn-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"></button>
+  <span class="sep"></span>
+  <button id="btn-zout" title="Zoom out" aria-label="Zoom out">&minus;</button>
+  <button id="zlabel" title="Reset zoom to 100%">100%</button>
+  <button id="btn-zin" title="Zoom in" aria-label="Zoom in">+</button>
+  <button id="btn-fit" title="Zoom to fit" aria-label="Zoom to fit"></button>
+</div>
+
+<input id="filepick" type="file" accept="image/*" multiple hidden>
+<div id="toast" role="alert"></div>
+<div id="modal" class="hidden"></div>
+<div id="roompage" class="hidden"></div>
+<div id="dropmask" class="hidden">Drop an image to add it</div>
+
+<script type="module" src="/assets/@@V@@/app.js"></script>
+</body>
+</html>
