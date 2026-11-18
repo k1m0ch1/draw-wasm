@@ -569,7 +569,7 @@ function cloudDialog() {
     go.disabled = true;
     msg.textContent = '';
     const nm = yname.value.trim().replace(/\s+/g, ' ');
-    if (!validName(nm)) { msg.textContent = 'Your name must be 1 to 32 letters, digits, spaces, - _ . or ''; go.disabled = false; return; }
+    if (!validName(nm)) { msg.textContent = 'Your name must be 1 to 32 letters, digits, spaces, - _ . or an apostrophe'; go.disabled = false; return; }
     await idb.put('meta', 'name', nm).catch(() => {});
     try { await cloudStore(room.value.trim(), title.value.trim(), msg); }
     catch (e) { msg.textContent = e.message || 'Something went wrong'; go.disabled = false; }
@@ -704,7 +704,7 @@ function nameDialog(required) {
   const go = el('button', { class: 'pill primary', id: 'name-go' }, required ? 'Join' : 'Save');
   const submit = async () => {
     const n = inp.value.trim().replace(/\s+/g, ' ');
-    if (!validName(n)) { msg.textContent = 'Enter a name of 1 to 32 letters, digits, spaces, - _ . or ''; return; }
+    if (!validName(n)) { msg.textContent = 'Enter a name of 1 to 32 letters, digits, spaces, - _ . or an apostrophe'; return; }
     S.name = n;
     await idb.put('meta', 'name', n).catch(() => {});
     const wasStopped = S.needName;
