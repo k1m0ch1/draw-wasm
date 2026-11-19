@@ -1,0 +1,6 @@
+name = "coret-edge"
+main = "coret-edge.js"
+compatibility_date = "2025-01-01"
+account_id = "@@ACCOUNT_ID@@"
+workers_dev = false
+assets = { directory = "./public", binding = "ASSETS" }
