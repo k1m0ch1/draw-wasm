@@ -20,9 +20,12 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ok(r.status === 200 && /^[A-Za-z0-9_-]{10}$/.test(d.nano), 'create doc, nano ' + d.nano);
   const base = `/api/rooms/${R}/docs/${d.nano}`;
   // ownership
-  r = await j('DELETE', base); ok(r.status === 403, 'delete without token -> 403');
-  r = await j('DELETE', base, undefined, { 'x-owner-token': 'x'.repeat(48) }); ok(r.status === 403, 'delete with wrong token -> 403');
+  // no password set: everybody may edit and delete (item 46); with a password only the owner and password holders may
+  r = await j('PUT', `/api/rooms/${R}/password`, { password: 'secret-pw-1' }, { 'x-owner-token': tok }); ok(r.status === 200, 'owner sets a password');
+  r = await j('DELETE', base); ok(r.status === 403, 'delete without token (password set) -> 403');
+  r = await j('DELETE', base, undefined, { 'x-owner-token': 'x'.repeat(48) }); ok(r.status === 403, 'delete with wrong token (password set) -> 403');
   r = await j('DELETE', `/api/rooms/${R}`); ok(r.status === 403, 'delete room without token -> 403');
+  r = await j('PUT', `/api/rooms/${R}/password`, { password: '' }, { 'x-owner-token': tok }); ok(r.status === 200, 'owner removes the password again');
   r = await fetch(BASE + base); ok(r.status === 200, 'doc still exists');
   // odd ids
   for (const p of ['/api/rooms/..%2F..%2Fetc/docs/abcdefghij', '/api/rooms/' + 'a'.repeat(300), '/api/rooms/%E2%98%83%E2%98%83%E2%98%83', `/api/rooms/${R}/docs/short`, '/api/img/zzz', '/assets/..%2f..%2fetc%2fpasswd', '/%2e%2e/%2e%2e/etc/passwd']) {

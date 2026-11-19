@@ -218,6 +218,7 @@ function frame() {
 let lastSent = 0;
 function flushOps() {
   if (route.kind !== 'doc' || !S.wsOpen || S.reloadNeeded || !S.board.has_ops()) return;
+  if (!S.edit) { S.board.take_ops(); return; } // read-only: nothing to send (the server would refuse it anyway)
   const now = performance.now();
   if (now - lastSent < 40) return;
   lastSent = now;
@@ -831,7 +832,7 @@ async function onServer(m) {
       b.merge_snapshot(JSON.stringify(m.els));
       S.wsOpen = true;
       renderPeers();
-      setStatus('Live');
+      setStatus(S.edit ? 'Live' : 'Live (read-only)');
       if (!S.fitted) { S.fitted = true; b.fit(S.w, S.h); }
       lastSent = 0;
       uploadImages(JSON.parse(b.images_used())); // bytes held only by this browser reach the server
@@ -859,7 +860,7 @@ function sendCursor(p) {
 }
 const NAME_RE = /^[\p{L}\p{N} _.'-]+$/u;
 // the only emoji a name may be: faces (same ranges as the server)
-const FACES = [[0x1F600, 0x1F644], [0x1F910, 0x1F917], [0x1F920, 0x1F925], [0x1F927, 0x1F92F], [0x1F970, 0x1F976], [0x1F978, 0x1F97A]];
+const FACES = [[0x1F600, 0x1F637], [0x1F641, 0x1F644], [0x1F910, 0x1F917], [0x1F920, 0x1F925], [0x1F927, 0x1F92F], [0x1F970, 0x1F976], [0x1F978, 0x1F97A]];
 const isFace = (c) => FACES.some(([a, b]) => c >= a && c <= b);
 /** A typed or stored name: up to 32 plain characters, or exactly one face emoji. Empty is handled by the caller. */
 function validName(n) {

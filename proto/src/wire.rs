@@ -96,7 +96,7 @@ pub fn valid_nano(s: &str) -> bool {
 }
 
 /// Code point ranges of the emoji that depict a face (never hands, gesturing people or objects).
-/// Generated names use FACE_RANGES; cat faces are also accepted as a typed name.
+/// The same set is handed out to joiners without a name and accepted as a typed name.
 pub const FACE_RANGES: &[(u32, u32)] = &[
     (0x1F600, 0x1F637),
     (0x1F641, 0x1F644),
@@ -106,11 +106,9 @@ pub const FACE_RANGES: &[(u32, u32)] = &[
     (0x1F970, 0x1F976),
     (0x1F978, 0x1F97A),
 ];
-const CAT_FACES: (u32, u32) = (0x1F638, 0x1F640);
-
 pub fn is_face(c: char) -> bool {
     let u = c as u32;
-    FACE_RANGES.iter().any(|(a, b)| u >= *a && u <= *b) || (u >= CAT_FACES.0 && u <= CAT_FACES.1)
+    FACE_RANGES.iter().any(|(a, b)| u >= *a && u <= *b)
 }
 
 /// The face emoji handed out to joiners without a name.
