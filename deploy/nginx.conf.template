@@ -4,6 +4,7 @@ limit_req_zone $binary_remote_addr zone=draw_api:10m rate=20r/s;
 
 # Port 80: ACME challenges, a redirect to HTTPS for plain requests, and the app itself for requests a
 # CDN in "flexible" mode forwards (marked https via CF-Visitor), where a blanket redirect would loop.
+# /coret-api/ and /coret-ws/ are origin endpoints for the coret.app edge (a Cloudflare Worker proxies to them).
 server {
     listen 80;
     listen [::]:80;
@@ -12,6 +13,30 @@ server {
     include snippets/cloudflare-realip.conf;
 
     location /.well-known/acme-challenge/ { root /var/www/html; }
+
+    location /coret-api/ {
+        limit_req zone=draw_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8191/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host coret.app;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 60s;
+    }
+
+    location /coret-ws/ {
+        proxy_pass http://127.0.0.1:8191/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host coret.app;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
 
     client_max_body_size 5m;
 
@@ -79,6 +104,30 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/@@HOST@@/privkey.pem;
 
     include snippets/cloudflare-realip.conf;
+
+    location /coret-api/ {
+        limit_req zone=draw_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8191/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host coret.app;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 60s;
+    }
+
+    location /coret-ws/ {
+        proxy_pass http://127.0.0.1:8191/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host coret.app;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
 
     client_max_body_size 5m;
 
