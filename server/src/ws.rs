@@ -289,6 +289,7 @@ fn reject_ops(active: &Active, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>
                 t.del = true;
                 t.pts.clear();
                 t.tx.clear();
+                t.src.clear();
                 back.push(t);
             }
         }

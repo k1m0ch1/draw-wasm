@@ -3,10 +3,12 @@
 
 mod geom;
 mod gfx;
+mod mermaid;
 
 use geom::*;
 use gfx::Gfx;
 use proto::{Element, Kind};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use wasm_bindgen::prelude::*;
 
@@ -14,6 +16,12 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = Math)]
     fn random() -> f64;
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance)]
+    fn now() -> f64;
 }
 
 const ACCENT: &str = "#4f6bed";
@@ -95,6 +103,10 @@ pub struct Board {
     editing: String,
     /// read-only: local mutations are refused (the server enforces this too)
     ro: bool,
+    /// arrow route cache: id -> (input key, time computed, polyline)
+    rc: RefCell<HashMap<String, (u64, f64, Vec<P>)>>,
+    /// obstacle geometry hash, valid for the document revision stored with it
+    geo: std::cell::Cell<(u32, u64)>,
 }
 
 fn rid() -> String {
@@ -149,6 +161,8 @@ impl Board {
             edit_req: String::new(),
             editing: String::new(),
             ro: false,
+            rc: RefCell::new(HashMap::new()),
+            geo: std::cell::Cell::new((u32::MAX, 0)),
         }
     }
     pub fn set_readonly(&mut self, ro: bool) {
@@ -260,15 +274,7 @@ impl Board {
     pub fn fit(&mut self, vw: f64, vh: f64) {
         let mut b: Option<BB> = None;
         for e in self.els.values().filter(|e| !e.del) {
-            let (s, t);
-            let eb = if e.k == Kind::Arrow {
-                let (a, c) = arrow_ends(&self.els, e);
-                s = a;
-                t = c;
-                norm(s, t)
-            } else {
-                bbox(e)
-            };
+            let eb = self.el_bb(e);
             b = Some(b.map_or(eb, |u| union(u, eb)));
         }
         match b {
@@ -312,22 +318,48 @@ impl Board {
             if id == exclude || (bindable_only && !bindable(e.k)) {
                 continue;
             }
-            if hit(&self.els, e, p, tol) {
+            let h = if e.k == Kind::Arrow {
+                let b = self.arrow_reach(e);
+                p.0 >= b.0 && p.0 <= b.0 + b.2 && p.1 >= b.1 && p.1 <= b.1 + b.3 && dist_poly(p, &self.route_of(e)) <= tol + e.sw / 2.0
+            } else {
+                hit(&self.els, e, p, tol)
+            };
+            if h {
                 return Some(id.clone());
             }
         }
         None
     }
+    /// Cheap box that contains the whole route of an arrow (its ends plus the detour allowance).
+    fn arrow_reach(&self, e: &Element) -> BB {
+        let (s, t) = arrow_ends(&self.els, e);
+        let b = norm(s, t);
+        (b.0 - WIN - 20.0, b.1 - WIN - 20.0, b.2 + 2.0 * (WIN + 20.0), b.3 + 2.0 * (WIN + 20.0))
+    }
+    /// Bounding box including the whole route for arrows.
+    fn el_bb(&self, e: &Element) -> BB {
+        if e.k == Kind::Arrow {
+            let r = self.route_of(e);
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for q in &r {
+                x0 = x0.min(q.0);
+                y0 = y0.min(q.1);
+                x1 = x1.max(q.0);
+                y1 = y1.max(q.1);
+            }
+            if x0 > x1 {
+                return bbox(e);
+            }
+            (x0, y0, x1 - x0, y1 - y0)
+        } else {
+            bbox(e)
+        }
+    }
     fn sel_bbox(&self) -> Option<BB> {
         let mut b: Option<BB> = None;
         for id in &self.sel {
             if let Some(e) = self.els.get(id).filter(|e| !e.del) {
-                let eb = if e.k == Kind::Arrow {
-                    let (s, t) = arrow_ends(&self.els, e);
-                    norm(s, t)
-                } else {
-                    bbox(e)
-                };
+                let eb = self.el_bb(e);
                 b = Some(b.map_or(eb, |u| union(u, eb)));
             }
         }
@@ -702,7 +734,9 @@ impl Board {
                 let mut s: Vec<String> = if add { self.sel.clone() } else { vec![] };
                 for id in &self.order {
                     let e = &self.els[id];
-                    if intersects(e, &self.els, r) && !s.contains(id) {
+                    let eb = self.el_bb(e);
+                    let hit_r = eb.0 <= r.0 + r.2 && eb.0 + eb.2 >= r.0 && eb.1 <= r.1 + r.3 && eb.1 + eb.3 >= r.1;
+                    if hit_r && !s.contains(id) {
                         s.push(id.clone());
                     }
                 }
@@ -850,7 +884,7 @@ impl Board {
     }
     /// Commit the text editor. w/h are the measured text size (used for free-standing text).
     pub fn commit_text(&mut self, id: &str, text: &str, w: f64, h: f64) {
-        let text: String = text.chars().take(proto::MAX_TEXT_BYTES / 4).collect();
+        let text = clip_bytes(text, proto::MAX_TEXT_BYTES);
         if id == "pending" {
             if let Some(mut e) = self.pending.take() {
                 if text.trim().is_empty() {
@@ -1079,7 +1113,7 @@ impl Board {
     }
     /// Add a free-standing text label at screen position (sx, sy) with measured size (w, h).
     pub fn add_text(&mut self, text: &str, w: f64, h: f64, sx: f64, sy: f64) {
-        let text: String = text.chars().take(proto::MAX_TEXT_BYTES / 4).collect();
+        let text = clip_bytes(text, proto::MAX_TEXT_BYTES);
         if text.trim().is_empty() {
             return;
         }
@@ -1205,8 +1239,8 @@ impl Board {
                     e.sw = sw;
                     ch = true;
                 }
-                if ah >= 0 && e.k == Kind::Arrow && e.ah != ah as u8 {
-                    e.ah = ah as u8;
+                if ah >= 0 && e.k == Kind::Arrow && e.ah & AH_HEADS != ah as u8 & AH_HEADS {
+                    e.ah = (e.ah & !AH_HEADS) | (ah as u8 & AH_HEADS);
                     ch = true;
                 }
                 if fs > 0.0 && matches!(e.k, Kind::Rect | Kind::Ellipse | Kind::Diamond | Kind::Text) && e.fs != fs {
@@ -1230,7 +1264,7 @@ impl Board {
         let es: Vec<&Element> = self.sel.iter().filter_map(|i| self.els.get(i)).collect();
         let first = es.first();
         let (st, fl, sw, ah, fs) = match first {
-            Some(e) => (e.st.clone(), e.fl.clone(), e.sw, e.ah, e.fs),
+            Some(e) => (e.st.clone(), e.fl.clone(), e.sw, e.ah & AH_HEADS, e.fs),
             None => (self.st.clone(), self.fl.clone(), self.sw, self.ah, self.fs),
         };
         let kinds: BTreeSet<String> = es.iter().map(|e| format!("{:?}", e.k).to_lowercase()).collect();
@@ -1430,6 +1464,151 @@ impl Board {
             .sum();
         (a + h) as f64
     }
+    // ------------------------------------------------------------ conversions (text -> html / mermaid)
+    /// The single selected text element: (id, source). Err = message for the user.
+    fn selected_text(&self) -> Result<(String, String), String> {
+        if self.ro {
+            return Err("This document is read-only".into());
+        }
+        let one = if self.sel.len() == 1 { self.els.get(&self.sel[0]).filter(|e| !e.del) } else { None };
+        match one {
+            Some(e) if e.k == Kind::Text && !e.tx.trim().is_empty() => Ok((e.id.clone(), e.tx.clone())),
+            Some(e) if e.k == Kind::Text => Err("The selected text is empty".into()),
+            _ => Err("Select one text element first (paste or type the code as text)".into()),
+        }
+    }
+
+    /// Turn the selected text element into an HTML object. Returns "ok:<id>" or "err:<message>"; on error nothing changed.
+    pub fn text_to_html(&mut self) -> String {
+        let (id, tx) = match self.selected_text() {
+            Ok(v) => v,
+            Err(m) => return format!("err:{}", m),
+        };
+        let src = strip_fence(&tx, &["html", "htm", ""]);
+        if src.trim().is_empty() {
+            return "err:The selected text has no HTML".into();
+        }
+        if src.len() > proto::MAX_HTML_BYTES {
+            return format!("err:HTML is too large ({} KB, the limit is {} KB)", src.len() / 1024 + 1, proto::MAX_HTML_BYTES / 1024);
+        }
+        let old = self.els[&id].clone();
+        let mut e = self.new_el(Kind::Html);
+        e.x = old.x;
+        e.y = old.y;
+        e.w = 520.0;
+        e.h = 360.0;
+        e.src = src;
+        e.z = old.z;
+        let nid = e.id.clone();
+        self.begin_tx();
+        self.remove_ids(&[id]);
+        self.put(e);
+        self.end_tx();
+        self.set_sel(vec![nid.clone()]);
+        format!("ok:{}", nid)
+    }
+
+    /// Live HTML objects as JSON [[id,x,y,w,h,v],...] in world coordinates, for the shell's iframe layer.
+    pub fn html_list(&self) -> String {
+        let v: Vec<(&str, f64, f64, f64, f64, u32)> =
+            self.els.values().filter(|e| e.k == Kind::Html && !e.del).map(|e| (e.id.as_str(), e.x, e.y, e.w, e.h, e.v)).collect();
+        serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
+    }
+    pub fn html_src(&self, id: &str) -> String {
+        self.els.get(id).filter(|e| e.k == Kind::Html && !e.del).map(|e| e.src.clone()).unwrap_or_default()
+    }
+
+    /// Turn the selected mermaid text into real elements. Returns "ok:<nodes>:<edges>" or "err:<message>".
+    /// Everything (create the flow + remove the text) is one undo step; on error nothing changed.
+    pub fn text_to_mermaid(&mut self) -> String {
+        let (id, tx) = match self.selected_text() {
+            Ok(v) => v,
+            Err(m) => return format!("err:{}", m),
+        };
+        let g = match mermaid::parse(&tx) {
+            Ok(g) => g,
+            Err(m) => return format!("err:{}", m),
+        };
+        let lay = mermaid::layout(&g);
+        let old = self.els[&id].clone();
+        let (ox, oy) = (old.x, old.y);
+        let horiz = matches!(g.dir, mermaid::Dir::Lr | mermaid::Dir::Rl);
+        let mut z = self.top_z();
+        let mut made: Vec<Element> = vec![];
+        let mut ids: Vec<String> = vec![];
+        for (i, n) in g.nodes.iter().enumerate() {
+            let (x, y, w, h) = lay.pos[i];
+            let (k, fl) = match n.shape {
+                mermaid::Shape::Rect => (Kind::Rect, "#dbeafe"),
+                mermaid::Shape::Round => (Kind::Rect, "#d3f9d8"),
+                mermaid::Shape::Diamond => (Kind::Diamond, "#fff3bf"),
+                mermaid::Shape::Circle => (Kind::Ellipse, "#f3d9fa"),
+            };
+            let mut e = self.new_el(k);
+            e.x = ox + x;
+            e.y = oy + y;
+            e.w = w;
+            e.h = h;
+            e.fl = fl.into();
+            e.fs = mermaid::FS;
+            e.tx = mermaid::wrap_label(&n.label, 24);
+            e.z = z;
+            z += 1.0;
+            ids.push(e.id.clone());
+            made.push(e);
+        }
+        let mut edges: Vec<(Element, String)> = vec![];
+        for ed in g.edges.iter().filter(|e| e.a != e.b) {
+            let mut a = self.new_el(Kind::Arrow);
+            a.sb = ids[ed.a].clone();
+            a.eb = ids[ed.b].clone();
+            let (ca, cb) = (center(&made[ed.a]), center(&made[ed.b]));
+            a.pts = vec![ca.0, ca.1, cb.0, cb.1];
+            a.ah = (if ed.head { 1 } else { 0 }) | (if horiz { AH_HINT_H } else { AH_HINT_V }) | (if ed.dash { AH_DASH } else { 0 });
+            a.sw = if ed.thick { 4.0 } else { 2.0 };
+            a.z = z;
+            z += 1.0;
+            edges.push((a, ed.label.clone()));
+        }
+        // route every edge on the finished layout, then put its label beside the route
+        let mut tmp: Els = made.iter().map(|e| (e.id.clone(), e.clone())).collect();
+        for (a, _) in &edges {
+            tmp.insert(a.id.clone(), a.clone());
+        }
+        let mut taken: Vec<R> = vec![];
+        let mut labels: Vec<Element> = vec![];
+        for (a, lab) in &edges {
+            if lab.is_empty() {
+                continue;
+            }
+            let r = route(&tmp, a, true);
+            let c = label_pos(&tmp, &r, lab, mermaid::LABEL_FS, &taken);
+            let (w, h) = label_size(lab, mermaid::LABEL_FS);
+            taken.push((c.0 - w / 2.0, c.1 - h / 2.0, c.0 + w / 2.0, c.1 + h / 2.0));
+            let mut t = self.new_el(Kind::Text);
+            t.fs = mermaid::LABEL_FS;
+            t.tx = lab.clone();
+            t.st = "#495057".into();
+            t.w = w - 10.0;
+            t.h = h - 4.0;
+            t.x = c.0 - t.w / 2.0;
+            t.y = c.1 - t.h / 2.0;
+            t.z = z;
+            z += 1.0;
+            labels.push(t);
+        }
+        self.begin_tx();
+        self.remove_ids(&[id]);
+        let mut sel = vec![];
+        for e in made.into_iter().chain(edges.into_iter().map(|x| x.0)).chain(labels) {
+            sel.push(e.id.clone());
+            self.put(e);
+        }
+        self.end_tx();
+        self.set_sel(sel);
+        format!("ok:{}:{}", g.nodes.len(), g.edges.len())
+    }
+
     pub fn live_count(&self) -> usize {
         self.els.values().filter(|e| !e.del).count()
     }
@@ -1442,12 +1621,7 @@ impl Board {
     pub fn element_screen(&self, id: &str) -> Vec<f64> {
         match self.els.get(id) {
             Some(e) => {
-                let (x, y, w, h) = if e.k == Kind::Arrow {
-                    let (s, t) = arrow_ends(&self.els, e);
-                    norm(s, t)
-                } else {
-                    bbox(e)
-                };
+                let (x, y, w, h) = self.el_bb(e);
                 vec![x * self.zoom + self.px, y * self.zoom + self.py, w * self.zoom, h * self.zoom]
             }
             None => vec![],
@@ -1511,7 +1685,9 @@ impl Board {
         let vis: BB = (-self.px / self.zoom, -self.py / self.zoom, w / self.zoom, h / self.zoom);
         for id in &self.order {
             let e = &self.els[id];
-            if !intersects(e, &self.els, (vis.0 - 40.0, vis.1 - 40.0, vis.2 + 80.0, vis.3 + 80.0)) {
+            let eb = if e.k == Kind::Arrow { self.arrow_reach(e) } else { bbox(e) };
+            let r = (vis.0 - 40.0, vis.1 - 40.0, vis.2 + 80.0, vis.3 + 80.0);
+            if !(eb.0 <= r.0 + r.2 && eb.0 + eb.2 >= r.0 && eb.1 <= r.1 + r.3 && eb.1 + eb.3 >= r.1) {
                 continue;
             }
             self.draw_el(g, e);
@@ -1539,13 +1715,19 @@ impl Board {
                 g.stroke(&self.st, self.sw, 0.0);
             }
             G::Arrow { start, cur, sb, eb } => {
-                let sp = self.els.get(sb).filter(|e| !e.del).map(|e| boundary_point(e, *cur, -3.0)).unwrap_or(*start);
-                let ep = self.els.get(eb).filter(|e| !e.del).map(|e| boundary_point(e, sp, -3.0)).unwrap_or(*cur);
+                let mut tmp = Element { k: Kind::Arrow, pts: vec![start.0, start.1, cur.0, cur.1], ..Default::default() };
+                if sb != eb {
+                    tmp.sb = sb.clone();
+                    tmp.eb = eb.clone();
+                }
+                let r = route(&self.els, &tmp, false);
                 g.begin();
-                g.mv(sp.0, sp.1);
-                g.ln(ep.0, ep.1);
+                rounded_poly(g, &r, 8.0);
                 g.stroke(&self.st, self.sw, 0.0);
-                arrow_head(g, sp, ep, self.sw, &self.st, self.ah & 1 != 0);
+                if r.len() >= 2 && self.ah & 1 != 0 {
+                    let (a, b) = (r[r.len() - 2], r[r.len() - 1]);
+                    arrow_head(g, a, b, self.sw, &self.st, true);
+                }
             }
             G::Marquee { start, cur, .. } => {
                 let b = norm(*start, *cur);
@@ -1645,20 +1827,30 @@ impl Board {
                 g.stroke(&e.st, sw, 0.0);
             }
             Kind::Arrow => {
-                let (s, t) = arrow_ends(&self.els, e);
+                let r = self.route_of(e);
+                let n = r.len();
                 g.begin();
-                g.mv(s.0, s.1);
-                g.ln(t.0, t.1);
-                g.stroke(&e.st, sw, 0.0);
-                if e.ah & 1 != 0 {
-                    arrow_head(g, s, t, sw, &e.st, true);
-                }
-                if e.ah & 2 != 0 {
-                    arrow_head(g, t, s, sw, &e.st, true);
+                rounded_poly(g, &r, 8.0);
+                g.stroke(&e.st, sw, if e.ah & AH_DASH != 0 { 7.0 } else { 0.0 });
+                if n >= 2 {
+                    let (s, t) = (r[0], r[n - 1]);
+                    let dir = |a: P, b: P| {
+                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                        let l = (dx * dx + dy * dy).sqrt().max(1e-6);
+                        (dx / l * 60.0, dy / l * 60.0)
+                    };
+                    if e.ah & 1 != 0 {
+                        let u = dir(r[n - 2], t);
+                        arrow_head(g, (t.0 - u.0, t.1 - u.1), t, sw, &e.st, true);
+                    }
+                    if e.ah & 2 != 0 {
+                        let u = dir(r[1], s);
+                        arrow_head(g, (s.0 - u.0, s.1 - u.1), s, sw, &e.st, true);
+                    }
                 }
                 if !e.tx.is_empty() && !self.edit_target(&e.id) {
                     let fs = if e.fs > 0.0 { e.fs } else { 18.0 };
-                    let (mx, my) = ((s.0 + t.0) / 2.0, (s.1 + t.1) / 2.0);
+                    let (mx, my) = poly_mid(&r);
                     let lines: Vec<&str> = e.tx.split('\n').collect();
                     let lh = fs * 1.3;
                     let tw = lines.iter().map(|l| g.measure(l, fs)).fold(0.0, f64::max);
@@ -1671,8 +1863,44 @@ impl Board {
                     }
                 }
             }
+            Kind::Html => {
+                // the markup itself is drawn by a sandboxed iframe underneath this transparent canvas
+                g.begin();
+                g.rrect(e.x, e.y, e.w, e.h, 4.0);
+                g.stroke("#d0d5dd", 1.0, 0.0);
+            }
             Kind::Image => g.image(&e.img, e.x, e.y, e.w, e.h),
         }
+    }
+    /// Route of an arrow (cached; while a drag is going on a result up to 33 ms old is reused: <= 30 Hz).
+    fn route_of(&self, e: &Element) -> Vec<P> {
+        let n = ends(&self.els, e);
+        if n.sd.is_none() && n.ed.is_none() {
+            return vec![n.s, n.e];
+        }
+        let mut gk = self.geo.get();
+        if gk.0 != self.doc_rev {
+            gk = (self.doc_rev, geo_hash(&self.els));
+            self.geo.set(gk);
+        }
+        let key = route_key(&self.els, e, gk.1);
+        let t = now();
+        let dragging = matches!(self.g, G::Move { .. } | G::Resize { .. } | G::Endpoint { .. });
+        let mut c = self.rc.borrow_mut();
+        if let Some((k, at, r)) = c.get(&e.id) {
+            // while dragging: arrows that do not touch the moving nodes keep their route, the others are refreshed at <= 30 Hz
+            let moving = |id: &str| self.tx.as_ref().map_or(false, |m| m.contains_key(id));
+            let touched = moving(&e.id) || moving(&e.sb) || moving(&e.eb);
+            if *k == key || (dragging && (!touched || t - *at < 33.0)) {
+                return r.clone();
+            }
+        }
+        if c.len() > 4096 {
+            c.clear();
+        }
+        let r = route(&self.els, e, true);
+        c.insert(e.id.clone(), (key, t, r.clone()));
+        r
     }
     fn edit_target(&self, id: &str) -> bool {
         !self.editing.is_empty() && self.editing == id
@@ -1708,6 +1936,65 @@ fn describe(ch: &[Change]) -> String {
         }
     }
     "edit".into()
+}
+
+/// Remove a surrounding markdown fence (```lang ... ```), a BOM and surrounding whitespace.
+fn strip_fence(s: &str, langs: &[&str]) -> String {
+    let t = s.trim_start_matches('\u{feff}').trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        let (first, body) = rest.split_once('\n').unwrap_or((rest, ""));
+        if langs.contains(&first.trim().to_ascii_lowercase().as_str()) {
+            let body = body.trim_end();
+            let body = body.strip_suffix("```").unwrap_or(body);
+            return body.trim().to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// Longest prefix of `s` that fits in `max` bytes (on a char boundary).
+fn clip_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut n = max;
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    s[..n].to_string()
+}
+
+/// Polyline with rounded corners (quadratic bends of radius `r`).
+fn rounded_poly(g: &Gfx, p: &[P], r: f64) {
+    if p.is_empty() {
+        return;
+    }
+    g.mv(p[0].0, p[0].1);
+    for i in 1..p.len().saturating_sub(1) {
+        let (a, b, c) = (p[i - 1], p[i], p[i + 1]);
+        let l1 = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt().max(1e-6);
+        let l2 = ((c.0 - b.0).powi(2) + (c.1 - b.1).powi(2)).sqrt().max(1e-6);
+        let rr = r.min(l1 / 2.0).min(l2 / 2.0);
+        g.ln(b.0 + (a.0 - b.0) / l1 * rr, b.1 + (a.1 - b.1) / l1 * rr);
+        g.quad(b.0, b.1, b.0 + (c.0 - b.0) / l2 * rr, b.1 + (c.1 - b.1) / l2 * rr);
+    }
+    let l = p[p.len() - 1];
+    g.ln(l.0, l.1);
+}
+
+/// Point half way along a polyline.
+fn poly_mid(p: &[P]) -> P {
+    let len: f64 = p.windows(2).map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt()).sum();
+    let mut left = len / 2.0;
+    for w in p.windows(2) {
+        let l = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+        if l >= left && l > 0.0 {
+            let t = left / l;
+            return (w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t);
+        }
+        left -= l;
+    }
+    p.first().copied().unwrap_or((0.0, 0.0))
 }
 
 fn diamond_path(g: &Gfx, b: BB) {

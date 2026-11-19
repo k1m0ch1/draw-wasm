@@ -3,6 +3,7 @@ import init, { Board } from './engine.js';
 import { Gfx, FONT } from './gfx.js';
 import { idb } from './db.js';
 import { Images, prepareImage } from './images.js';
+import { VERSION } from './version.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => {
@@ -43,6 +44,8 @@ const S = {
   edit: true, pw: false, grant: '',
 };
 window.__draw = S; // inspection hook for tests; contains no secrets
+S.version = VERSION;
+$('ver').textContent = 'v' + VERSION;
 /** Memory in use by this page: wasm linear memory, JS heap, and the decoded-image caches (bytes). */
 S.memory = () => {
   const st = S.images.stats();
@@ -153,6 +156,10 @@ function buildStyle() {
     return b;
   });
   sec('Text', ...sizes);
+  const conv = (label, title, fn) => { const b = el('button', { class: 'chip wide', title, 'data-conv': label }, label); b.addEventListener('click', fn); return b; };
+  sec('Convert', conv('text2html', 'Render the selected text as an HTML object (scripts never run)', () => convert('html')),
+    conv('text2mermaid', 'Turn the selected mermaid flowchart text into real shapes and arrows', () => convert('mermaid')));
+  p.lastChild.append(el('div', { class: 'hint' }, 'Select a text element holding HTML or mermaid code.'));
   const act = (label, fn, cls = '') => { const b = el('button', { class: 'chip wide ' + cls }, label); b.addEventListener('click', fn); return b; };
   sec('Arrange',
     act('Front', () => S.board.z_front()), act('Forward', () => S.board.z_up()),
@@ -181,7 +188,59 @@ function syncStyle() {
   vis(2, none || k.some((x) => !['text', 'image'].includes(x)));
   vis(3, none || k.includes('arrow'));
   vis(4, none || k.some((x) => ['rect', 'ellipse', 'diamond', 'text'].includes(x)));
-  vis(5, info.n > 0);
+  vis(5, true); // Convert: always there (pressing it with nothing selected shows a hint)
+  vis(6, info.n > 0);
+}
+
+// ---------------------------------------------------------------- conversions + HTML objects
+/** text2html / text2mermaid on the selection. Errors never change the document and quote the build. */
+function convert(kind) {
+  const b = S.board;
+  if (!b) return;
+  if (S.editing) commitEdit();
+  if (b.selection() === '[]') { toast('Select a text element first, then press ' + (kind === 'html' ? 'text2html' : 'text2mermaid'), 4500); return; }
+  const r = kind === 'html' ? b.text_to_html() : b.text_to_mermaid();
+  if (r.startsWith('err:')) { toast(r.slice(4) + ' - the text was left as it was (draw v' + VERSION + ')', 7000); return; }
+  b.invalidate();
+  if (kind === 'mermaid') { const [, n, e] = r.split(':'); toast(`Flow created: ${n} nodes, ${e} edges (Ctrl+Z undoes it)`, 3500); }
+  else toast('HTML object created (scripts never run). Ctrl+Z undoes it.', 3500);
+}
+/**
+ * HTML objects live in sandboxed iframes under the (transparent) canvas. The sandbox attribute is EMPTY: no
+ * allow-scripts and no allow-same-origin, so embedded JavaScript can never run and can never reach this page.
+ * The frames follow the canvas transform; pointer events go through them to the canvas, so they select/move like shapes.
+ */
+const htmlFrames = new Map(); // id -> { f, v }
+function syncHtml() {
+  const layer = $('htmllayer');
+  const b = S.board;
+  const list = JSON.parse(b.html_list());
+  const z = b.zoom(), px = b.pan_x(), py = b.pan_y();
+  const seen = new Set();
+  for (const [id, x, y, w, h, v] of list) {
+    seen.add(id);
+    let o = htmlFrames.get(id);
+    if (!o) {
+      const f = document.createElement('iframe');
+      f.className = 'htmlobj';
+      f.setAttribute('sandbox', ''); // the security guarantee: nothing is allowed
+      f.setAttribute('referrerpolicy', 'no-referrer');
+      f.setAttribute('tabindex', '-1');
+      f.setAttribute('title', 'HTML object');
+      layer.append(f);
+      o = { f, v: -1, w: 0, h: 0 };
+      htmlFrames.set(id, o);
+    }
+    if (o.v !== v) { // content is re-read only when the element changed
+      o.v = v;
+      const src = b.html_src(id);
+      if (o.src !== src) { o.src = src; o.f.srcdoc = src; }
+    }
+    if (o.w !== w || o.h !== h) { o.w = w; o.h = h; o.f.style.width = w + 'px'; o.f.style.height = h + 'px'; }
+    o.f.style.transform = `translate(${px + x * z}px, ${py + y * z}px) scale(${z})`;
+    o.f.style.display = (px + (x + w) * z < 0 || py + (y + h) * z < 0 || px + x * z > S.w || py + y * z > S.h) ? 'none' : '';
+  }
+  for (const [id, o] of htmlFrames) if (!seen.has(id)) { o.f.remove(); htmlFrames.delete(id); }
 }
 
 // ---------------------------------------------------------------- sizing + render loop
@@ -210,6 +269,7 @@ function frame() {
       b.render(S.gfx, S.w, S.h, S.dpr);
       S.images.trim();
       positionCursors();
+      syncHtml();
       $('zlabel').textContent = Math.round(b.zoom() * 100) + '%';
       $('btn-undo').classList.toggle('dim', !b.can_undo());
       $('btn-redo').classList.toggle('dim', !b.can_redo());
@@ -259,7 +319,7 @@ async function saveLocal(why) {
   } catch (e) {
     S.dirty = true;
     setStatus('Could not save locally');
-    toast('Saving in this browser failed: ' + (e && e.message || e));
+    toast('Saving in this browser failed: ' + (e && e.message || e) + ' (draw v' + VERSION + ')');
   } finally { S.saving = false; }
 }
 async function loadLocal() {
@@ -311,7 +371,7 @@ async function addImageFile(file, at) {
     S.board.add_image(img.hash, img.w, img.h, p[0], p[1]);
     S.board.invalidate();
     uploadImages([img.hash]);
-  } catch (e) { toast('Could not add the image: ' + (e && e.message || e), 8000); }
+  } catch (e) { toast('Could not add the image: ' + (e && e.message || e) + ' (draw v' + VERSION + ')', 8000); }
 }
 
 // ---------------------------------------------------------------- text editing overlay
@@ -535,7 +595,7 @@ function bindInput() {
       for (const it of files) { const f = it.getAsFile(); if (f) await addImageFile(f, S.mouse ? [S.mouse[0] + 24 * n, S.mouse[1] + 24 * n] : null); n++; }
     } else if (text.trim()) { // plain text from elsewhere becomes a text label
       e.preventDefault();
-      const t = text.slice(0, 2000);
+      const t = text.slice(0, 120000);
       const [w, h] = textSize(t, S.board.default_fs());
       const at = S.mouse || [S.w / 2, S.h / 2];
       S.board.add_text(t, w, h, at[0], at[1]);
@@ -1127,4 +1187,4 @@ async function main() {
   S.lastDocRev = S.board.doc_rev();
   requestAnimationFrame(frame);
 }
-main().catch((e) => { console.error(e); toast('Failed to start: ' + (e && e.message || e), 10000); });
+main().catch((e) => { console.error(e); toast('Failed to start: ' + (e && e.message || e) + ' (draw v' + VERSION + ')', 10000); });

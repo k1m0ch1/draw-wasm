@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const MAX_TEXT_BYTES: usize = 20_000;
+/// Text elements may hold a whole mermaid diagram or HTML page (the HTML object itself is capped at MAX_HTML_BYTES).
+pub const MAX_TEXT_BYTES: usize = 131_072;
+/// Source of an HTML object (rendered in a sandboxed iframe without scripts).
+pub const MAX_HTML_BYTES: usize = 65_536;
 pub const MAX_PTS: usize = 40_000;
 pub const MAX_COORD: f64 = 1.0e7;
 
@@ -23,6 +26,7 @@ pub enum Kind {
     Pencil,
     Text,
     Image,
+    Html,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -84,6 +88,9 @@ pub struct Element {
     /// image: sha256 (hex) of the stored bytes
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub img: String,
+    /// html object: the markup (rendered in an iframe sandbox without allow-scripts / allow-same-origin)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub src: String,
 }
 
 pub fn valid_id(s: &str) -> bool {
@@ -148,6 +155,15 @@ impl Element {
         if self.k == Kind::Image && !self.del && self.img.is_empty() {
             return Err("image without ref");
         }
+        if self.src.len() > MAX_HTML_BYTES {
+            return Err("html too large");
+        }
+        if !self.src.is_empty() && self.k != Kind::Html {
+            return Err("bad html payload");
+        }
+        if self.k == Kind::Html && !self.del && self.src.trim().is_empty() {
+            return Err("html without source");
+        }
         Ok(())
     }
 }
@@ -174,6 +190,7 @@ impl Doc {
         if n.del {
             n.pts.clear();
             n.tx.clear();
+            n.src.clear();
         }
         self.els.insert(n.id.clone(), n);
         true
@@ -192,6 +209,20 @@ mod tests {
 
     fn el(id: &str, v: u32, by: &str) -> Element {
         Element { id: id.into(), v, by: by.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn html_validation() {
+        let mut e = el("h1", 1, "a");
+        e.k = Kind::Html;
+        assert!(e.validate().is_err());
+        e.src = "<p>hi</p>".into();
+        assert!(e.validate().is_ok());
+        e.src = "x".repeat(MAX_HTML_BYTES + 1);
+        assert!(e.validate().is_err());
+        let mut r = el("r1", 1, "a");
+        r.src = "<p>".into();
+        assert!(r.validate().is_err());
     }
 
     #[test]
