@@ -7,7 +7,7 @@
 
 | | |
 |---|---|
-| **WASM engine** | 226 KB raw · ~104 KB gzip (budget 2 MiB) |
+| **WASM engine** | 234 KB raw · ~107 KB gzip (budget 2 MiB) |
 | **Backend** | 1 binary · 1 container · SQLite |
 | **Accounts** | 0 — device tokens, hashed |
 | **Live sync** | < 1 s between people (~160 ms typical) |
@@ -162,7 +162,7 @@ Measured on the production deployment, November 2026.
 
 | Property | Value | Meaning |
 |---|---|---|
-| WASM engine size | 226,569 B raw · ~104 KB gzip | hard budget 2 MiB — page loads fast anywhere |
+| WASM engine size | 234,114 B raw · ~107 KB gzip | hard budget 2 MiB — page loads fast anywhere |
 | Live edit latency | ~160 ms typical | from one person's screen to another's |
 | Autosave | 60 s idle + manual + tab close | whichever comes first |
 | Share URL | `/room-id/nano-id-10` | room names claimable; document ids unguessable |
