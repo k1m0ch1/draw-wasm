@@ -16,3 +16,4 @@ engine/pkg/
 .DS_Store
 *.png
 !web/**/*.png
+!docs/**
