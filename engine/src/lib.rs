@@ -248,9 +248,14 @@ impl Board {
         self.zoom = z;
         self.need_render = true;
     }
+    /// Set an exact zoom level (clamped to 10%..400%) keeping the screen point (sx, sy) fixed.
     pub fn set_zoom(&mut self, sx: f64, sy: f64, z: f64) {
-        let f = z / self.zoom;
-        self.zoom_at(sx, sy, f);
+        let z = z.clamp(0.1, 4.0);
+        let k = z / self.zoom;
+        self.px = sx - (sx - self.px) * k;
+        self.py = sy - (sy - self.py) * k;
+        self.zoom = z;
+        self.need_render = true;
     }
     pub fn fit(&mut self, vw: f64, vh: f64) {
         let mut b: Option<BB> = None;

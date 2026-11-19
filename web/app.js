@@ -852,11 +852,16 @@ async function onServer(m) {
 }
 function sendCursor(p) {
   if (route.kind !== 'doc' || !S.wsOpen) return;
-  const now = performance.now();
-  if (now - S.lastCursorSent < 50) return;
-  S.lastCursorSent = now;
-  const w = S.board.w2s(0, 0), z = S.board.zoom();
-  wsSend({ t: 'cur', x: (p[0] - w[0]) / z, y: (p[1] - w[1]) / z });
+  const send = () => {
+    S.lastCursorSent = performance.now();
+    const q = S.curLast;
+    const w = S.board.w2s(0, 0), z = S.board.zoom();
+    wsSend({ t: 'cur', x: (q[0] - w[0]) / z, y: (q[1] - w[1]) / z });
+  };
+  S.curLast = p;
+  const wait = 50 - (performance.now() - S.lastCursorSent);
+  if (wait <= 0) { clearTimeout(S.curT); S.curT = null; send(); }
+  else if (!S.curT) S.curT = setTimeout(() => { S.curT = null; send(); }, wait); // the last position is never dropped
 }
 const NAME_RE = /^[\p{L}\p{N} _.'-]+$/u;
 // the only emoji a name may be: faces (same ranges as the server)
