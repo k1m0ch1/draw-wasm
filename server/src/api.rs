@@ -2,8 +2,8 @@
 //! short generic error messages (no internals).
 
 use crate::db;
-use crate::limits::{ct_eq, hash_ip, sha256_hex};
-use crate::state::{lock, nanoid, App};
+use crate::limits::{hash_ip, sha256_hex};
+use crate::state::{lock, nanoid, App, Rights};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -74,20 +74,28 @@ fn owner_hash(h: &HeaderMap) -> Option<String> {
     Some(sha256_hex(t.as_bytes()))
 }
 
-async fn is_owner(app: &App, room: &str, h: &HeaderMap) -> Result<bool, Response> {
-    let Some(hash) = owner_hash(h) else { return Ok(false) };
-    let r = room.to_string();
-    let stored: Option<Option<String>> = app
-        .db
-        .call(move |c| {
-            c.query_row("SELECT owner_hash FROM rooms WHERE id=?1", params![r], |row| row.get::<_, String>(0)).ok()
-        })
-        .await;
-    match stored {
-        None => Err(internal()),
-        Some(None) => Ok(false),
-        Some(Some(s)) => Ok(ct_eq(&s, &hash)),
+fn grant_hash(h: &HeaderMap) -> Option<String> {
+    let t = h.get("x-edit-grant")?.to_str().ok()?;
+    if t.len() < 20 || t.len() > 128 || !t.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
     }
+    Some(sha256_hex(t.as_bytes()))
+}
+
+/// Rights of the caller in `room`, decided only from server-side state (owner token hash, password
+/// state and the stored edit grants). 404 when the room does not exist.
+pub async fn rights_of(app: &App, room: &str, h: &HeaderMap) -> Result<Rights, Response> {
+    app.rights(room, owner_hash(h), grant_hash(h))
+        .await
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "room not found"))
+}
+
+async fn need_edit(app: &App, room: &str, h: &HeaderMap) -> Result<Rights, Response> {
+    let r = rights_of(app, room, h).await?;
+    if !r.edit {
+        return Err(err(StatusCode::FORBIDDEN, "this room is read-only: enter the edit password"));
+    }
+    Ok(r)
 }
 
 fn base_url(app: &App, h: &HeaderMap) -> String {
@@ -180,7 +188,7 @@ pub async fn get_room(
     if let Some(e) = bad_room(&room) {
         return Err(e);
     }
-    let owner = is_owner(&app, &room, &h).await?;
+    let rights = rights_of(&app, &room, &h).await?;
     let r = room.clone();
     let rows: Option<Option<Vec<(String, String, i64)>>> = app
         .db
@@ -203,7 +211,7 @@ pub async fn get_room(
         Some(None) => Err(err(StatusCode::NOT_FOUND, "room not found")),
         Some(Some(v)) => {
             let docs: Vec<_> = v.into_iter().map(|(n, t, u)| json!({ "nano": n, "title": t, "updated": u })).collect();
-            ok(json!({ "room": room, "owner": owner, "docs": docs }))
+            ok(json!({ "room": room, "owner": rights.owner, "pw": rights.pw, "edit": rights.edit, "docs": docs }))
         }
     }
 }
@@ -219,8 +227,9 @@ pub async fn delete_room(
     if let Some(e) = bad_room(&room) {
         return Err(e);
     }
-    if !is_owner(&app, &room, &h).await? {
-        return Err(err(StatusCode::FORBIDDEN, "only the room owner can do this"));
+    match app.rights(&room, owner_hash(&h), None).await {
+        Some(r) if r.owner => {}
+        _ => return Err(err(StatusCode::FORBIDDEN, "only the room owner can do this")),
     }
     let r = room.clone();
     let nanos: Vec<String> = app
@@ -298,6 +307,7 @@ pub async fn create_doc(
     if let Some(e) = bad_room(&room) {
         return Err(e);
     }
+    need_edit(&app, &room, &h).await?;
     if body.len() > app.cfg.max_doc_bytes + 4096 {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "document too large"));
     }
@@ -398,10 +408,8 @@ pub async fn delete_doc(
     if !proto::valid_nano(&nano) {
         return Err(err(StatusCode::NOT_FOUND, "document not found"));
     }
-    if !is_owner(&app, &room, &h).await? {
-        return Err(err(StatusCode::FORBIDDEN, "only the room owner can do this"));
-    }
-    app.drop_doc(&nano).await;
+    need_edit(&app, &room, &h).await?;
+    app.drop_doc_in(&room, &nano).await;
     let (r, n) = (room, nano);
     let deleted = app
         .db
@@ -448,6 +456,7 @@ pub async fn upload_image(
     if !proto::valid_nano(&nano) {
         return Err(err(StatusCode::NOT_FOUND, "document not found"));
     }
+    need_edit(&app, &room, &h).await?;
     if body.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "empty body"));
     }
@@ -543,4 +552,127 @@ pub async fn get_image(
         )
             .into_response()),
     }
+}
+
+// ------------------------------------------------------------------ room edit password
+
+#[derive(Deserialize)]
+pub struct PwReq {
+    #[serde(default)]
+    password: String,
+}
+
+fn hash_password(pw: &str) -> Option<String> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    let mut raw = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let salt = SaltString::encode_b64(&raw).ok()?;
+    argon2::Argon2::default().hash_password(pw.as_bytes(), &salt).ok().map(|h| h.to_string())
+}
+
+fn verify_password(pw: &str, stored: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    match PasswordHash::new(stored) {
+        Ok(h) => argon2::Argon2::default().verify_password(pw.as_bytes(), &h).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Owner only: set, change or (empty password) remove the room's edit password. Revokes every grant.
+pub async fn set_password(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(room): Path<String>,
+    h: HeaderMap,
+    body: Bytes,
+) -> Res {
+    let k = general(&app, &peer, &h)?;
+    rate(&app, &k, "setpw", 5.0, 0.1)?;
+    if let Some(e) = bad_room(&room) {
+        return Err(e);
+    }
+    if body.len() > 1024 {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "request too large"));
+    }
+    let req: PwReq = serde_json::from_slice(&body).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid request"))?;
+    let r = rights_of(&app, &room, &h).await?;
+    if !r.owner {
+        return Err(err(StatusCode::FORBIDDEN, "only the room owner can do this"));
+    }
+    let n = req.password.chars().count();
+    let hash: Option<String> = if n == 0 {
+        None
+    } else if !(4..=128).contains(&n) {
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "the password must be 4 to 128 characters"));
+    } else {
+        let _permit = app.pw_sem.acquire().await.map_err(|_| internal())?;
+        let pw = req.password;
+        Some(tokio::task::spawn_blocking(move || hash_password(&pw)).await.ok().flatten().ok_or_else(internal)?)
+    };
+    let has = hash.is_some();
+    let rm = room.clone();
+    app.db
+        .call(move |c| {
+            let _ = c.execute("UPDATE rooms SET pw_hash=?1 WHERE id=?2", params![hash, rm]);
+            let _ = c.execute("DELETE FROM grants WHERE room=?1", params![rm]);
+        })
+        .await;
+    app.bump_gen(&room);
+    ok(json!({ "ok": true, "pw": has }))
+}
+
+/// Exchange the room password for an edit grant (a random token bound to this room, only its hash is stored).
+pub async fn unlock(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(room): Path<String>,
+    h: HeaderMap,
+    body: Bytes,
+) -> Res {
+    let k = general(&app, &peer, &h)?;
+    rate(&app, &k, "unlock", 6.0, 0.1)?; // per client address
+    if let Some(e) = bad_room(&room) {
+        return Err(e);
+    }
+    rate(&app, &room, "unlockroom", 10.0, 0.2)?; // per room: bounds guessing even from many addresses
+    if body.len() > 1024 {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "request too large"));
+    }
+    let req: PwReq = serde_json::from_slice(&body).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid request"))?;
+    let rm = room.clone();
+    let stored: Option<Option<Option<String>>> = app
+        .db
+        .call(move |c| c.query_row("SELECT pw_hash FROM rooms WHERE id=?1", params![rm], |r| r.get::<_, Option<String>>(0)).ok())
+        .await;
+    let stored = match stored {
+        None => return Err(internal()),
+        Some(None) => return Err(err(StatusCode::NOT_FOUND, "room not found")),
+        Some(Some(s)) => s,
+    };
+    let Some(stored) = stored else {
+        return ok(json!({ "grant": "", "pw": false })); // no password: nothing to unlock
+    };
+    let good = {
+        let _permit = app.pw_sem.acquire().await.map_err(|_| internal())?;
+        let pw = req.password;
+        tokio::task::spawn_blocking(move || verify_password(&pw, &stored)).await.unwrap_or(false)
+    };
+    if !good {
+        return Err(err(StatusCode::UNAUTHORIZED, "wrong password"));
+    }
+    let mut raw = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+    let (hash, rm) = (sha256_hex(token.as_bytes()), room.clone());
+    app.db
+        .call(move |c| {
+            let _ = c.execute("INSERT OR IGNORE INTO grants (room, hash, created) VALUES (?1,?2,?3)", params![rm, hash, db::now()]);
+            // keep the table bounded: only the newest 500 grants of a room are valid
+            let _ = c.execute(
+                "DELETE FROM grants WHERE room=?1 AND rowid NOT IN (SELECT rowid FROM grants WHERE room=?1 ORDER BY created DESC, rowid DESC LIMIT 500)",
+                params![rm],
+            );
+        })
+        .await;
+    ok(json!({ "grant": token, "pw": true }))
 }

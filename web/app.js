@@ -40,6 +40,7 @@ const S = {
   spaceDown: false, pointers: new Map(), pan: null, pinch: null, editing: null,
   lastCursorSent: 0, netWrites: 0, mouse: null,
   build: document.querySelector('meta[name=draw-build]')?.content || '', reloadNeeded: false,
+  edit: true, pw: false, grant: '',
 };
 window.__draw = S; // inspection hook for tests; contains no secrets
 
@@ -51,6 +52,23 @@ function toast(msg, ms = 3500) {
   toast.t = setTimeout(() => t.classList.remove('show'), ms);
 }
 function setStatus(s) { $('status').textContent = s; }
+/** One short popup at the top of the screen; a new one replaces the previous one. */
+function popup(msg) {
+  const t = $('undopop');
+  t.textContent = msg;
+  t.classList.add('show');
+  S.popupCount = (S.popupCount || 0) + 1;
+  clearTimeout(popup.t);
+  popup.t = setTimeout(() => t.classList.remove('show'), 1400);
+}
+function doUndo() {
+  const l = S.board.undo();
+  popup(l ? 'Undo: ' + l : 'Nothing to undo');
+}
+function doRedo() {
+  const l = S.board.redo();
+  popup(l ? 'Redo: ' + l : 'Nothing to redo');
+}
 
 // ---------------------------------------------------------------- icons
 const ICON = {
@@ -184,10 +202,12 @@ function frame() {
       b.render(S.gfx, S.w, S.h, S.dpr);
       positionCursors();
       $('zlabel').textContent = Math.round(b.zoom() * 100) + '%';
-      $('btn-undo').disabled = !b.can_undo();
-      $('btn-redo').disabled = !b.can_redo();
+      $('btn-undo').classList.toggle('dim', !b.can_undo());
+      $('btn-redo').classList.toggle('dim', !b.can_redo());
       for (const t of document.querySelectorAll('#toolbar button')) t.classList.toggle('active', t.dataset.tool === b.tool());
       if (S.editing) layoutEditor();
+    } else if (S.gfx.animNext <= performance.now()) {
+      b.invalidate(); // an animated GIF is on screen and its next frame is due
     }
     S.canvas.style.cursor = S.spaceDown ? (S.pan ? 'grabbing' : 'grab') : b.cursor();
     flushOps();
@@ -252,9 +272,18 @@ function scanImages() {
   for (const h of JSON.parse(S.board.images_used())) pendingImages.add(h);
 }
 const imgUrl = (h) => `/api/rooms/${route.room}/docs/${route.nano}/images`;
+/** Request headers that carry this browser's rights (the server decides what they are worth). */
+async function authHeaders(room) {
+  const h = {};
+  const t = await token(room);
+  if (t) h['x-owner-token'] = t;
+  const g = await idb.get('meta', 'grant:' + room).catch(() => null);
+  if (g) h['x-edit-grant'] = g;
+  return h;
+}
 /** Make sure the server holds these images for this document (background, retried, shown on the element). */
 function uploadImages(hashes) {
-  if (route.kind !== 'doc') return;
+  if (route.kind !== 'doc' || !S.edit) return;
   for (const h of hashes) S.images.upload(h, imgUrl(h));
 }
 function imageHashesIn(json) {
@@ -266,7 +295,8 @@ async function addImageFile(file, at) {
     if (!file.type.startsWith('image/')) { toast('That file is not an image'); return; }
     const img = await prepareImage(file);
     await idb.put('images', img.hash, img.blob).catch(() => {});
-    S.images.set(img.hash, img.bmp);
+    S.images.set(img.hash, img.bmp, img.animated ? img.blob : null);
+    if (img.note) toast(img.note, 6000);
     const p = at || S.mouse || [S.w / 2, S.h / 2];
     S.board.add_image(img.hash, img.w, img.h, p[0], p[1]);
     S.board.invalidate();
@@ -288,8 +318,8 @@ function startEdit(id) {
   ta.addEventListener('input', () => layoutEditor());
   ta.addEventListener('keydown', (ev) => {
     ev.stopPropagation();
-    if (ev.key === 'Escape') { ev.preventDefault(); commitEdit(); }
-    else if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); commitEdit(); }
+    if (ev.key === 'Escape') { ev.preventDefault(); cancelEdit(); }
+    else if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); commitEdit(); } // Shift+Enter: new line
   });
   ta.addEventListener('blur', () => setTimeout(() => { if (S.editing && S.editing.ta === ta) commitEdit(); }, 0));
   layoutEditor();
@@ -320,15 +350,30 @@ function layoutEditor() {
     ta.style.width = Math.max(40, tw * z + 24) + 'px';
     ta.style.height = Math.max(th * z, fs * 1.3) + 'px';
   } else {
+    // inside the shape: centred and wrapped to the same width the engine uses when it draws the label
     ta.style.textAlign = 'center';
+    ta.style.whiteSpace = 'pre-wrap';
+    ta.style.overflowWrap = 'anywhere';
     const w = e.w * z, h = e.h * z;
-    const bw = Math.max(60, w * 0.8), n = ta.value.split('\n').length;
+    const inner = ed.k === 'arrow' ? 180 * z : (e.k === 'rect' ? e.w - 20 : e.w * 0.62) * z;
+    const bw = Math.max(56, inner);
     ta.style.width = bw + 'px';
-    const th = Math.max(fs * 1.3 * n, fs * 1.3);
+    ta.style.height = '0px';
+    const th = Math.max(ta.scrollHeight, fs * 1.3);
     ta.style.height = th + 'px';
     ta.style.left = s[0] + (w - bw) / 2 + 'px';
     ta.style.top = s[1] + (h - th) / 2 + 'px';
   }
+}
+function cancelEdit() {
+  const ed = S.editing;
+  if (!ed) return;
+  S.editing = null;
+  ed.ta.remove();
+  S.board.set_editing('');
+  S.board.cancel_text();
+  S.board.invalidate();
+  S.canvas.focus({ preventScroll: true });
 }
 function commitEdit() {
   const ed = S.editing;
@@ -425,7 +470,7 @@ function bindInput() {
     const p = localPos(ev);
     let dy = ev.deltaY, dx = ev.deltaX;
     if (ev.deltaMode === 1) { dy *= 16; dx *= 16; }
-    if (ev.ctrlKey) { S.board.zoom_at(p[0], p[1], Math.exp(-dy * 0.01)); return; } // pinch on a touchpad / ctrl+wheel
+    if (ev.ctrlKey) { S.board.zoom_at(p[0], p[1], Math.exp(-dy * (Math.abs(dy) >= 40 ? 0.002 : 0.01))); return; } // pinch on a touchpad / ctrl+wheel
     if (ev.shiftKey && dx === 0) { S.board.pan(-dy, 0); return; }
     // A touchpad two-finger scroll sends small / fractional / horizontal deltas: pan. A mouse wheel
     // sends big whole steps: zoom to the cursor.
@@ -436,6 +481,8 @@ function bindInput() {
     S.board.zoom_at(p[0], p[1], Math.exp(-dy * 0.0015));
   }, { passive: false });
 
+  window.addEventListener('wheel', (ev) => { if (ev.ctrlKey) ev.preventDefault(); }, { passive: false });
+  for (const g of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(g, (ev) => ev.preventDefault());
   $('stage').addEventListener('dragover', (e) => { e.preventDefault(); $('dropmask').classList.remove('hidden'); });
   $('stage').addEventListener('dragleave', () => $('dropmask').classList.add('hidden'));
   $('stage').addEventListener('drop', async (e) => {
@@ -532,13 +579,15 @@ function onKey(e) {
   const k = e.key.toLowerCase();
   if (e.code === 'Space') return;
   if (mod) {
-    if (k === 'z') { e.preventDefault(); e.shiftKey ? b.redo() : b.undo(); }
-    else if (k === 'y') { e.preventDefault(); b.redo(); }
+    if (k === 'z') { e.preventDefault(); e.shiftKey ? doRedo() : doUndo(); }
+    else if (k === 'y') { e.preventDefault(); doRedo(); }
     else if (k === 'a') { e.preventDefault(); b.select_all(); }
     else if (k === 'd') { e.preventDefault(); b.duplicate(); }
     // c / x / v are handled by the copy, cut and paste events (system clipboard)
     else if (k === 's') { e.preventDefault(); doSave(); }
     else if (k === '0') { e.preventDefault(); b.set_zoom(S.w / 2, S.h / 2, 1); }
+    else if (k === '=' || k === '+') { e.preventDefault(); b.zoom_at(S.w / 2, S.h / 2, 1.25); }
+    else if (k === '-' || k === '_') { e.preventDefault(); b.zoom_at(S.w / 2, S.h / 2, 0.8); }
     return;
   }
   const tools = { v: 'select', r: 'rect', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pencil', t: 'text' };
@@ -562,12 +611,14 @@ function bindButtons() {
   $('btn-zout').onclick = () => S.board.zoom_at(S.w / 2, S.h / 2, 0.8);
   $('zlabel').onclick = () => S.board.set_zoom(S.w / 2, S.h / 2, 1);
   $('btn-fit').onclick = () => S.board.fit(S.w, S.h);
-  $('btn-undo').onclick = () => S.board.undo();
-  $('btn-redo').onclick = () => S.board.redo();
+  $('btn-undo').onclick = () => doUndo();
+  $('btn-redo').onclick = () => doRedo();
   $('btn-save').onclick = () => doSave();
   $('btn-cloud').onclick = () => cloudDialog();
   $('btn-share').onclick = () => shareDialog();
   $('btn-name').onclick = () => nameDialog(false);
+  $('btn-pw').onclick = () => passwordDialog();
+  $('btn-unlock').onclick = () => unlockDialog();
   $('btn-del').onclick = () => deleteDocDialog();
   $('btn-style').onclick = () => $('style').classList.toggle('open');
   window.addEventListener('resize', resize);
@@ -599,7 +650,7 @@ const randomRoom = () => {
 };
 async function api(method, path, body, room) {
   const headers = {};
-  if (room) { const t = await token(room); if (t) headers['x-owner-token'] = t; }
+  if (room) Object.assign(headers, await authHeaders(room));
   let payload;
   if (body instanceof Blob) payload = body;
   else if (body !== undefined) { headers['content-type'] = 'application/json'; payload = JSON.stringify(body); }
@@ -614,7 +665,7 @@ async function api(method, path, body, room) {
 function cloudDialog() {
   const room = el('input', { id: 'cloud-room', type: 'text', value: randomRoom(), maxlength: '32', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Room ID' });
   const title = el('input', { id: 'cloud-title', type: 'text', value: 'Untitled', maxlength: '80', 'aria-label': 'Document title' });
-  const yname = el('input', { id: 'cloud-name', type: 'text', value: S.name || 'Owner', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name' });
+  const yname = el('input', { id: 'cloud-name', type: 'text', value: S.name || '', placeholder: 'optional', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name' });
   const msg = el('div', { class: 'msg', id: 'cloud-msg' });
   const go = el('button', { class: 'pill primary', id: 'cloud-go' }, 'Make public and store');
   const cancel = el('button', { class: 'pill', id: 'cloud-cancel' }, 'Cancel');
@@ -625,8 +676,8 @@ function cloudDialog() {
     go.disabled = true;
     msg.textContent = '';
     const nm = yname.value.trim().replace(/\s+/g, ' ');
-    if (!validName(nm)) { msg.textContent = 'Your name must be 1 to 32 letters, digits, spaces, - _ . or an apostrophe'; go.disabled = false; return; }
-    await idb.put('meta', 'name', nm).catch(() => {});
+    if (nm && !validName(nm)) { msg.textContent = 'Your name must be up to 32 letters, digits, spaces, - _ . or an apostrophe (or one smiley)'; go.disabled = false; return; }
+    if (nm) await idb.put('meta', 'name', nm).catch(() => {});
     try { await cloudStore(room.value.trim(), title.value.trim(), msg); }
     catch (e) { msg.textContent = e.message || 'Something went wrong'; go.disabled = false; }
   };
@@ -635,7 +686,7 @@ function cloudDialog() {
     el('p', { class: 'warn', id: 'cloud-warning' }, 'Cloud documents are PUBLIC. Anyone who has the link can view and edit this document and its images, and anyone can open the room page. Do not store anything private.'),
     el('label', {}, 'Room ID (first come, first served)'), room, dice,
     el('label', {}, 'Title'), title,
-    el('label', {}, 'Your name (shown to others as the room owner)'), yname, msg,
+    el('label', {}, 'Your name (optional, shown to others as the room owner; empty = a random smiley)'), yname, msg,
     el('div', { class: 'actions' }, cancel, go)));
 }
 async function cloudStore(roomId, title, msg) {
@@ -691,7 +742,7 @@ function connect() {
   ws.__live = true;
   setStatus(S.wsTry ? 'Reconnecting...' : 'Connecting...');
   ws.onopen = () => {
-    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: S.name, token: S.token, seq: S.seq, build: S.build }));
+    ws.send(JSON.stringify({ t: 'hello', cid: S.cid, name: S.name, token: S.token, grant: S.grant, seq: S.seq, build: S.build }));
     clearInterval(S.pingT);
     S.pingT = setInterval(() => wsSend({ t: 'ping' }), 25000);
   };
@@ -765,12 +816,14 @@ async function onServer(m) {
   const b = S.board;
   switch (m.t) {
     case 'reload': onReload(m); break;
+    case 'perm': setPerm(m.edit, m.pw); break;
     case 'snap': {
       if (S.reloadNeeded) break; // outdated build: keep local state untouched until the reload
       S.wsTry = 0;
       hideBanner();
       if (!S.restored) { S.restored = true; await restorePending(); }
       S.you = m.you; S.seq = m.seq; S.title = m.title;
+      if (!S.name && m.you.name) { S.name = m.you.name; idb.put('meta', 'name', S.name).catch(() => {}); } // a smiley is remembered like a typed name
       $('doctitle').textContent = m.title;
       document.title = `${m.title} - draw-wasm`;
       S.peers = new Map(m.peers.map((p) => [p.id, p]));
@@ -789,7 +842,7 @@ async function onServer(m) {
     case 'cur': S.cursors.set(m.id, { x: m.x, y: m.y, t: performance.now() }); positionCursors(); break;
     case 'saved': setStatus('Saved to the cloud'); setTimeout(() => S.wsOpen && setStatus('Live'), 2000); break;
     case 'err':
-      if (/display name/.test(m.msg)) { S.needName = true; S.stopped = true; nameDialog(true); } else toast(m.msg);
+      if (/display name/.test(m.msg)) { S.needName = true; S.stopped = true; S.name = ''; nameDialog(true); } else toast(m.msg);
       break;
     case 'deleted': S.stopped = true; toast('This document was deleted by the room owner'); setTimeout(() => location.assign('/' + route.room), 1500); break;
     default: break;
@@ -804,17 +857,26 @@ function sendCursor(p) {
   wsSend({ t: 'cur', x: (p[0] - w[0]) / z, y: (p[1] - w[1]) / z });
 }
 const NAME_RE = /^[\p{L}\p{N} _.'-]+$/u;
-function validName(n) { return n.length >= 1 && n.length <= 32 && NAME_RE.test(n); }
+// the only emoji a name may be: faces (same ranges as the server)
+const FACES = [[0x1F600, 0x1F644], [0x1F910, 0x1F917], [0x1F920, 0x1F925], [0x1F927, 0x1F92F], [0x1F970, 0x1F976], [0x1F978, 0x1F97A]];
+const isFace = (c) => FACES.some(([a, b]) => c >= a && c <= b);
+/** A typed or stored name: up to 32 plain characters, or exactly one face emoji. Empty is handled by the caller. */
+function validName(n) {
+  const cps = [...n];
+  if (cps.length === 1 && isFace(cps[0].codePointAt(0))) return true;
+  return n.length >= 1 && n.length <= 32 && NAME_RE.test(n);
+}
 /** Ask for a display name. `required` = cannot be dismissed (first join). */
 function nameDialog(required) {
-  const inp = el('input', { id: 'name-input', type: 'text', value: S.name || '', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name', placeholder: 'Your name' });
+  const inp = el('input', { id: 'name-input', type: 'text', value: S.name || '', maxlength: '32', autocomplete: 'off', 'aria-label': 'Your name', placeholder: 'Name (optional)' });
   const msg = el('div', { class: 'msg', id: 'name-msg' });
   const go = el('button', { class: 'pill primary', id: 'name-go' }, required ? 'Join' : 'Save');
   const submit = async () => {
     const n = inp.value.trim().replace(/\s+/g, ' ');
-    if (!validName(n)) { msg.textContent = 'Enter a name of 1 to 32 letters, digits, spaces, - _ . or an apostrophe'; return; }
-    S.name = n;
-    await idb.put('meta', 'name', n).catch(() => {});
+    if (n && !validName(n)) { msg.textContent = 'Use up to 32 letters, digits, spaces, - _ . or an apostrophe, or leave it empty'; return; }
+    S.name = n; // empty = the server hands out a random smiley, remembered after the join
+    if (n) await idb.put('meta', 'name', n).catch(() => {});
+    else await idb.put('meta', 'name', '').catch(() => {});
     const wasStopped = S.needName;
     S.needName = false;
     closeModal();
@@ -826,8 +888,8 @@ function nameDialog(required) {
   const actions = el('div', { class: 'actions' });
   if (!required) { const c = el('button', { class: 'pill', id: 'name-cancel' }, 'Cancel'); c.onclick = closeModal; actions.append(c); }
   actions.append(go);
-  modal(el('div', {}, el('h2', {}, required ? 'Pick a name to join' : 'Change your name'),
-    el('p', {}, 'Other people in this document see this name next to your cursor.'), inp, msg, actions));
+  modal(el('div', {}, el('h2', {}, required ? 'Pick a name to join (optional)' : 'Change your name'),
+    el('p', {}, 'Other people in this document see this name next to your cursor. Leave it empty to join as a random smiley.'), inp, msg, actions));
   const m = $('modal');
   if (required) m.onclick = null;
 }
@@ -839,7 +901,7 @@ function renderPeers() {
   for (const p of list.slice(0, 8)) {
     const d = el('span', { class: 'peer' + (p.owner ? ' owner' : ''), title: p.name + (p.owner ? ' (owner)' : '') + (p.me ? ' (you)' : '') });
     d.style.background = /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#888';
-    d.textContent = (p.name || '?').slice(0, 1).toUpperCase();
+    d.textContent = ([...(p.name || '?')][0] || '?').toUpperCase();
     d.dataset.peer = p.id;
     box.append(d);
   }
@@ -870,6 +932,70 @@ function positionCursors() {
   for (const d of [...layer.children]) if (!seen.has(d.dataset.cid)) d.remove();
 }
 
+// ---------------------------------------------------------------- edit password (items 46)
+/** Apply what the server says this connection may do. The server enforces it; this only shapes the UI. */
+function setPerm(edit, pw) {
+  S.edit = !!edit;
+  S.pw = !!pw;
+  S.board?.set_readonly(!S.edit);
+  document.body.classList.toggle('ro', !S.edit);
+  $('rochip').classList.toggle('hidden', S.edit || route.kind !== 'doc');
+  $('btn-del').classList.toggle('hidden', !S.edit || route.kind !== 'doc');
+  $('btn-save').classList.toggle('hidden', route.kind === 'doc' && !S.edit);
+  if (!S.edit) { commitEdit(); setStatus('Read-only: enter the password to edit'); }
+  else if (S.wsOpen) { setStatus('Live'); uploadImages(JSON.parse(S.board.images_used())); }
+}
+/** Ask for the room password; on success the server's grant is remembered in this browser. */
+function unlockDialog(after) {
+  const inp = el('input', { id: 'unlock-input', type: 'password', maxlength: '128', autocomplete: 'off', 'aria-label': 'Room edit password' });
+  const msg = el('div', { class: 'msg', id: 'unlock-msg' });
+  const go = el('button', { class: 'pill primary', id: 'unlock-go' }, 'Unlock editing');
+  const cancel = el('button', { class: 'pill', id: 'unlock-cancel' }, 'Cancel');
+  cancel.onclick = closeModal;
+  const submit = async () => {
+    go.disabled = true;
+    msg.textContent = '';
+    try {
+      const r = await api('POST', `/api/rooms/${route.room}/unlock`, { password: inp.value }, route.room);
+      if (r.grant) { await idb.put('meta', 'grant:' + route.room, r.grant); S.grant = r.grant; }
+      closeModal();
+      toast('Editing unlocked');
+      if (after) { after(); return; }
+      if (S.ws) { S.wsTry = 0; try { S.ws.close(); } catch { /* reconnect below */ } } // reconnect with the grant
+    } catch (e) { msg.textContent = e.status === 401 ? 'Wrong password' : e.message; go.disabled = false; }
+  };
+  go.onclick = submit;
+  inp.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') submit(); });
+  modal(el('div', {}, el('h2', {}, 'This room is read-only'),
+    el('p', {}, 'Enter the room password to edit. You can keep viewing without it.'), inp, msg, el('div', { class: 'actions' }, cancel, go)));
+}
+/** Owner: set, change or remove the room's edit password. */
+function passwordDialog(after) {
+  const inp = el('input', { id: 'pw-input', type: 'password', maxlength: '128', autocomplete: 'new-password', placeholder: S.pw ? 'New password' : 'Password (4+ characters)', 'aria-label': 'New room edit password' });
+  const msg = el('div', { class: 'msg', id: 'pw-msg' });
+  const send = async (pw) => {
+    try {
+      const r = await api('PUT', `/api/rooms/${route.room}/password`, { password: pw }, route.room);
+      S.pw = r.pw;
+      closeModal();
+      toast(r.pw ? 'Edit password set: everyone without it is now read-only' : 'Edit password removed: everyone can edit');
+      if (after) after();
+    } catch (e) { msg.textContent = e.message; }
+  };
+  const go = el('button', { class: 'pill primary', id: 'pw-set' }, S.pw ? 'Change password' : 'Set password');
+  go.onclick = () => { if (inp.value.length < 4) { msg.textContent = 'Use at least 4 characters'; return; } send(inp.value); };
+  inp.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') go.click(); });
+  const rm = el('button', { class: 'pill danger', id: 'pw-remove' }, 'Remove password');
+  rm.onclick = () => send('');
+  if (!S.pw) rm.classList.add('hidden');
+  const cancel = el('button', { class: 'pill', id: 'pw-cancel' }, 'Cancel');
+  cancel.onclick = closeModal;
+  modal(el('div', {}, el('h2', {}, 'Room edit password'),
+    el('p', {}, S.pw ? 'A password is set: only you and people who know it can edit. Changing or removing it signs everyone else out of editing.'
+      : 'No password: everyone with the link can edit and delete. Set one to make the room read-only for everyone who does not know it.'),
+    inp, msg, el('div', { class: 'actions' }, cancel, rm, go)));
+}
+
 // ---------------------------------------------------------------- pages
 async function roomPage() {
   document.body.classList.add('roommode');
@@ -885,6 +1011,18 @@ async function roomPage() {
   try { data = await api('GET', `/api/rooms/${route.room}`, undefined, route.room); }
   catch (e) { list.append(el('p', { class: 'msg' }, e.status === 404 ? 'This room does not exist.' : e.message)); return; }
   const mk = el('button', { class: 'pill primary', id: 'new-doc' }, 'New document');
+  if (!data.edit) {
+    mk.classList.add('hidden');
+    head.append(el('span', { class: 'rotext', id: 'room-ro' }, 'Read-only'));
+    const un = el('button', { class: 'pill primary', id: 'room-unlock' }, 'Enter password to edit');
+    un.onclick = () => unlockDialog(() => location.reload());
+    head.append(un);
+  }
+  if (data.owner) {
+    const pb = el('button', { class: 'pill', id: 'room-pw' }, 'Password');
+    pb.onclick = () => passwordDialog(() => location.reload());
+    head.append(pb);
+  }
   mk.onclick = async () => {
     mk.disabled = true;
     try { const d = await api('POST', `/api/rooms/${route.room}/docs`, { title: 'Untitled', els: [] }, route.room); location.assign(`/${route.room}/${d.nano}`); }
@@ -931,13 +1069,18 @@ async function main() {
       const room = await api('GET', `/api/rooms/${route.room}`, undefined, route.room);
       S.owner = !!room.owner;
       if (S.owner) S.token = (await token(route.room)) || '';
-      $('btn-del').classList.toggle('hidden', !S.owner);
+      S.grant = (await idb.get('meta', 'grant:' + route.room).catch(() => '')) || '';
+      $('btn-pw').classList.toggle('hidden', !S.owner);
+      setPerm(room.edit !== false, !!room.pw);
       const crumb = el('a', { href: '/' + route.room, id: 'roomlink' }, route.room);
       $('doctitle').before(crumb, el('span', { class: 'slash' }, '/'));
     } catch { /* room page link is optional */ }
     S.name = (await idb.get('meta', 'name').catch(() => '')) || '';
     $('btn-name').classList.remove('hidden');
-    if (!S.owner && !validName(S.name)) { S.name = ''; S.needName = true; S.stopped = true; nameDialog(true); }
+    S.images.auth = () => authHeaders(route.room);
+    S.images.onChange = () => S.board?.invalidate();
+    if (!S.owner && !S.name) { S.needName = true; S.stopped = true; nameDialog(true); }
+    else if (S.name && !validName(S.name)) { S.name = ''; S.needName = true; S.stopped = true; nameDialog(true); }
     else connect();
     window.addEventListener('online', () => { if (!S.wsOpen && !S.reloadNeeded && !S.needName) { S.wsTry = 0; connect(); } });
     window.addEventListener('offline', () => { try { S.ws?.close(); } catch {} });

@@ -49,6 +49,14 @@ impl Config {
     }
 }
 
+/// What a caller may do in a room. Always computed on the server from the stored state.
+#[derive(Clone, Copy, Debug)]
+pub struct Rights {
+    pub owner: bool,
+    pub pw: bool,
+    pub edit: bool,
+}
+
 pub struct Client {
     pub peer: Peer,
     pub tx: mpsc::Sender<Arc<String>>,
@@ -80,6 +88,10 @@ pub struct App {
     pub salt: [u8; 16],
     pub docs: tokio::sync::Mutex<HashMap<String, Arc<Active>>>,
     pub next_conn: std::sync::atomic::AtomicU64,
+    /// bumped whenever a room's password changes; open sockets re-evaluate their rights when it moves
+    pub room_gen: Mutex<HashMap<String, u64>>,
+    /// bounds concurrent password hashing (argon2 is memory hungry on purpose)
+    pub pw_sem: tokio::sync::Semaphore,
     pub statics: crate::statics::Statics,
     /// asset version of the deployed web bundle (the client reports its own in the hello)
     pub build: String,
@@ -124,6 +136,41 @@ impl Inner {
 }
 
 impl App {
+    pub fn gen(&self, room: &str) -> u64 {
+        lock(&self.room_gen).get(room).copied().unwrap_or(0)
+    }
+    pub fn bump_gen(&self, room: &str) {
+        let mut m = lock(&self.room_gen);
+        *m.entry(room.to_string()).or_insert(0) += 1;
+    }
+    /// Rights for a caller holding (optionally) an owner token hash and an edit grant hash.
+    /// None when the room does not exist. No password: everybody may edit. Password: only the owner
+    /// and holders of a grant issued for THIS room.
+    pub async fn rights(&self, room: &str, owner_hash: Option<String>, grant_hash: Option<String>) -> Option<Rights> {
+        let r = room.to_string();
+        self.db
+            .call(move |c| {
+                let (oh, pw): (String, Option<String>) = c
+                    .query_row("SELECT owner_hash, pw_hash FROM rooms WHERE id=?1", rusqlite::params![r], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .ok()?;
+                let owner = owner_hash.map_or(false, |h| crate::limits::ct_eq(&oh, &h));
+                let has_pw = pw.is_some();
+                let granted = !owner
+                    && has_pw
+                    && match grant_hash {
+                        Some(g) => c
+                            .query_row("SELECT 1 FROM grants WHERE room=?1 AND hash=?2", rusqlite::params![r, g], |_| Ok(()))
+                            .is_ok(),
+                        None => false,
+                    };
+                Some(Rights { owner, pw: has_pw, edit: owner || !has_pw || granted })
+            })
+            .await
+            .flatten()
+    }
+
     /// Load (or fetch from memory) the active document and register a client. Returns None when the
     /// document does not exist or does not belong to `room`.
     pub async fn join(
@@ -133,6 +180,7 @@ impl App {
         conn: u64,
         client: Client,
     ) -> Option<(Arc<Active>, ServerMsg)> {
+        let mut client = client;
         let mut map = self.docs.lock().await;
         let active = match map.get(nano) {
             Some(a) if a.room == room => a.clone(),
@@ -188,6 +236,10 @@ impl App {
             let mut g = lock(&active.inner);
             if g.deleted {
                 return None;
+            }
+            if client.peer.name.is_empty() {
+                let used: std::collections::HashSet<String> = g.clients.values().map(|c| c.peer.name.clone()).collect();
+                client.peer.name = random_face(&used);
             }
             let you = client.peer.clone();
             let peers: Vec<Peer> = g.clients.values().map(|c| c.peer.clone()).collect();
@@ -280,6 +332,17 @@ impl App {
         }
     }
 
+    /// Delete a document only when it belongs to `room` (the DB delete is also scoped by room).
+    pub async fn drop_doc_in(&self, room: &str, nano: &str) {
+        let belongs = match self.docs.lock().await.get(nano) {
+            Some(a) => a.room == room,
+            None => true,
+        };
+        if belongs {
+            self.drop_doc(nano).await;
+        }
+    }
+
     /// Owner deleted a document: tell the clients and forget it.
     pub async fn drop_doc(&self, nano: &str) {
         let mut map = self.docs.lock().await;
@@ -301,18 +364,44 @@ pub fn random_color() -> String {
     COLORS[rand::thread_rng().gen_range(0..COLORS.len())].to_string()
 }
 
-/// Display name rules: trimmed, 1..=32 characters, no control characters, only letters, digits,
-/// spaces and a few punctuation marks. Returns None when invalid.
-pub fn clean_name(s: &str) -> Option<String> {
+pub enum NameCheck {
+    Empty,
+    Ok(String),
+    Bad,
+}
+
+/// Display name rules: trimmed, at most 32 characters, no control characters, only letters, digits,
+/// spaces and a few punctuation marks, OR exactly one face emoji. Empty is allowed (a face is assigned).
+pub fn name_check(s: &str) -> NameCheck {
     let t = s.trim();
     let n = t.chars().count();
-    if n == 0 || n > 32 {
-        return None;
+    if n == 0 {
+        return NameCheck::Empty;
+    }
+    if n > 32 {
+        return NameCheck::Bad;
+    }
+    if n == 1 && t.chars().next().map_or(false, proto::is_face) {
+        return NameCheck::Ok(t.to_string());
     }
     if !t.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')) {
-        return None;
+        return NameCheck::Bad;
     }
-    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+    NameCheck::Ok(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// A random face emoji, avoiding the ones `used` already when possible.
+pub fn random_face(used: &std::collections::HashSet<String>) -> String {
+    let all = proto::faces();
+    let free: Vec<char> = all.iter().copied().filter(|c| !used.contains(&c.to_string())).collect();
+    let pool = if free.is_empty() { &all } else { &free };
+    pool[rand::thread_rng().gen_range(0..pool.len())].to_string()
+}
+
+pub fn random_id(n: usize) -> String {
+    const A: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut r = rand::thread_rng();
+    (0..n).map(|_| A[r.gen_range(0..A.len())] as char).collect()
 }
 
 pub fn nanoid() -> String {

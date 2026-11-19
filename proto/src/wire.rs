@@ -28,6 +28,9 @@ pub enum ClientMsg {
         /// build id of the page the client runs (absent in clients older than the handshake)
         #[serde(default)]
         build: String,
+        /// edit grant issued by the server after the room password was entered (optional)
+        #[serde(default)]
+        grant: String,
     },
     Ops { ops: Vec<Element> },
     Cur { x: f64, y: f64 },
@@ -50,6 +53,8 @@ pub enum ServerMsg {
     Gone { id: String },
     Cur { id: String, x: f64, y: f64 },
     Pong,
+    /// What this connection may do. Computed by the server only; sent before the snapshot and whenever it changes.
+    Perm { edit: bool, pw: bool },
     Saved { seq: u64 },
     Err { msg: String },
     Deleted,
@@ -88,4 +93,27 @@ pub const NANO_LEN: usize = 10;
 
 pub fn valid_nano(s: &str) -> bool {
     s.len() == NANO_LEN && s.bytes().all(|b| NANO_ALPHABET.contains(&b))
+}
+
+/// Code point ranges of the emoji that depict a face (never hands, gesturing people or objects).
+/// Generated names use FACE_RANGES; cat faces are also accepted as a typed name.
+pub const FACE_RANGES: &[(u32, u32)] = &[
+    (0x1F600, 0x1F637),
+    (0x1F641, 0x1F644),
+    (0x1F910, 0x1F917),
+    (0x1F920, 0x1F925),
+    (0x1F927, 0x1F92F),
+    (0x1F970, 0x1F976),
+    (0x1F978, 0x1F97A),
+];
+const CAT_FACES: (u32, u32) = (0x1F638, 0x1F640);
+
+pub fn is_face(c: char) -> bool {
+    let u = c as u32;
+    FACE_RANGES.iter().any(|(a, b)| u >= *a && u <= *b) || (u >= CAT_FACES.0 && u <= CAT_FACES.1)
+}
+
+/// The face emoji handed out to joiners without a name.
+pub fn faces() -> Vec<char> {
+    FACE_RANGES.iter().flat_map(|(a, b)| (*a..=*b).filter_map(char::from_u32)).collect()
 }

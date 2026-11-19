@@ -7,10 +7,12 @@ export class Gfx {
     this.x = canvas.getContext('2d');
     this.images = images; // hash -> {img, state}
     this.scale = 1;
+    this.animNext = Infinity; // when an animated image drawn in the last render needs its next frame
     this.onImageReady = () => {};
   }
   clear(w, h) {
     const x = this.x;
+    this.animNext = Infinity;
     x.setTransform(1, 0, 0, 1, 0, 0);
     x.clearRect(0, 0, w, h);
     x.lineCap = 'round';
@@ -77,7 +79,13 @@ export class Gfx {
     const c = this.x;
     const e = this.images.get(hash);
     if (e && e.state === 'ok') {
-      c.drawImage(e.img, x, y, w, h);
+      let src = e.img;
+      if (e.anim) { // animated GIF: pick the frame for the current time and ask for a redraw when it ends
+        const f = e.anim.frameAt(performance.now());
+        src = f.src;
+        this.animNext = Math.min(this.animNext, f.until);
+      }
+      try { c.drawImage(src, x, y, w, h); } catch { c.drawImage(e.img, x, y, w, h); }
       const u = this.images.status(hash);
       if (u && u.state === 'failed') {
         c.save();

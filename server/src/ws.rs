@@ -61,28 +61,20 @@ async fn send_err(sock: &mut WebSocket, msg: &str) {
     let _ = sock.send(Message::Text(m.as_str().into())).await;
 }
 
-/// True when `token` is the ownership token of `room` (only its hash is stored and compared).
-async fn room_owner(app: &App, room: &str, token: &str) -> bool {
-    if token.len() < 20 || token.len() > 128 || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return false;
+/// Hash of a presented secret (owner token or edit grant) when it is well formed.
+fn secret_hash(t: &str) -> Option<String> {
+    if t.len() < 20 || t.len() > 128 || !t.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
     }
-    let hash = crate::limits::sha256_hex(token.as_bytes());
-    let r = room.to_string();
-    let stored: Option<Option<String>> = app
-        .db
-        .call(move |c| {
-            c.query_row("SELECT owner_hash FROM rooms WHERE id=?1", rusqlite::params![r], |row| row.get::<_, String>(0)).ok()
-        })
-        .await;
-    matches!(stored, Some(Some(s)) if crate::limits::ct_eq(&s, &hash))
+    Some(crate::limits::sha256_hex(t.as_bytes()))
 }
 
 async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, key: String) {
     // 1. hello (must arrive quickly)
     let hello = tokio::time::timeout(Duration::from_secs(10), sock.recv()).await;
-    let (cid, name, token, build) = match hello {
+    let (name, token, build, grant) = match hello {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(&t) {
-            Ok(ClientMsg::Hello { cid, name, token, build, .. }) if proto::valid_id(&cid) => (cid, name, token, build),
+            Ok(ClientMsg::Hello { cid, name, token, build, grant, .. }) if proto::valid_id(&cid) => (name, token, build, grant),
             _ => {
                 send_err(&mut sock, "expected hello").await;
                 return;
@@ -90,21 +82,27 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
         },
         _ => return,
     };
-    let is_owner = room_owner(&app, &room, &token).await;
-    let name = match clean_name(&name) {
-        Some(n) => n,
-        None if is_owner => "Owner".to_string(),
-        // a page older than the name prompt cannot show a dialog: admit it as a guest (it is told to
-        // reload below) instead of rejecting it in a reconnect loop
-        None if build.is_empty() => format!("Guest {}", rand::Rng::gen_range(&mut rand::thread_rng(), 1000..10000)),
-        None => {
-            send_err(&mut sock, "a display name (1 to 32 characters) is required").await;
+    // Rights are decided here from the stored state only; nothing the client says about itself counts.
+    let (oh, gh) = (secret_hash(&token), secret_hash(&grant));
+    let Some(mut rights) = app.rights(&room, oh.clone(), gh.clone()).await else {
+        send_err(&mut sock, "document not found").await;
+        return;
+    };
+    let mut seen_gen = app.gen(&room);
+    // empty name = the server picks a random face emoji when the client joins the document
+    let name = match name_check(&name) {
+        NameCheck::Ok(n) => n,
+        NameCheck::Empty => String::new(),
+        NameCheck::Bad => {
+            send_err(&mut sock, "invalid display name (at most 32 letters, digits, spaces or - _ . ')").await;
             return;
         }
     };
     let conn = app.next_conn.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::channel::<Arc<String>>(512);
-    let peer = Peer { id: cid.clone(), name, color: random_color(), owner: is_owner };
+    // the participant id other clients see is chosen by the server: it cannot be spoofed or collide
+    let pid = format!("p{}", random_id(11));
+    let peer = Peer { id: pid.clone(), name, color: random_color(), owner: rights.owner };
     let Some((active, snap)) = app.join(&room, &nano, conn, Client { peer, tx: tx.clone() }).await else {
         send_err(&mut sock, "document not found").await;
         return;
@@ -114,6 +112,7 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
         let _ = sock.send(Message::Text(encode(&ServerMsg::Reload { build: app.build.clone() }).as_str().into())).await;
     }
 
+    let _ = sock.send(Message::Text(encode(&ServerMsg::Perm { edit: rights.edit, pw: rights.pw }).as_str().into())).await;
     let first = encode(&snap);
     if sock.send(Message::Text(first.as_str().into())).await.is_err() {
         app.leave(&active, conn).await;
@@ -125,8 +124,12 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     let mut violations = 0u32;
     let _ = &key;
 
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
+            _ = tick.tick() => {
+                refresh_rights(&app, &room, &oh, &gh, &mut seen_gen, &mut rights, &tx).await;
+            }
             out = rx.recv() => {
                 match out {
                     Some(m) => {
@@ -167,7 +170,7 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
                     }
                     ClientMsg::Cur { x, y } => {
                         if !cur_bucket.take() || !x.is_finite() || !y.is_finite() { continue; }
-                        let m = encode(&ServerMsg::Cur { id: cid.clone(), x, y });
+                        let m = encode(&ServerMsg::Cur { id: pid.clone(), x, y });
                         lock(&active.inner).broadcast(&m, Some(conn));
                     }
                     ClientMsg::Save => {
@@ -184,6 +187,11 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
                         }
                         if ops.len() > MAX_OPS_PER_MSG {
                             let _ = tx.try_send(encode(&ServerMsg::Err { msg: "too many ops in one message".into() }));
+                            continue;
+                        }
+                        refresh_rights(&app, &room, &oh, &gh, &mut seen_gen, &mut rights, &tx).await;
+                        if !rights.edit {
+                            reject_ops(&active, &tx, ops);
                             continue;
                         }
                         apply_ops(&app, &active, conn, &tx, ops);
@@ -243,5 +251,73 @@ fn apply_ops(app: &App, active: &Active, conn: u64, tx: &mpsc::Sender<Arc<String
     }
     if let Some(m) = reject {
         let _ = tx.try_send(encode(&ServerMsg::Err { msg: m.to_string() }));
+    }
+}
+
+/// A read-only connection tried to write. Nothing is accepted; the writer's copy is put back to the
+/// server's state with a newer version so the client converges (and everybody else is unaffected
+/// content-wise). The client is told why.
+fn reject_ops(active: &Active, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>) {
+    let mut g = lock(&active.inner);
+    let mut fix: Vec<Element> = vec![]; // known elements: the stored state, re-versioned (goes to everyone)
+    let mut back: Vec<Element> = vec![]; // unknown elements: a tombstone, for the sender only
+    for e in ops.iter().take(MAX_OPS_PER_MSG) {
+        if e.validate().is_err() || e.v >= u32::MAX - 2 {
+            continue;
+        }
+        match g.doc.els.get(&e.id).cloned() {
+            Some(mut r) => {
+                r.v = r.v.max(e.v) + 1;
+                r.by = "srv".to_string();
+                if g.doc.apply(&r) {
+                    fix.push(r);
+                }
+            }
+            None => {
+                let mut t = e.clone();
+                t.v = e.v + 1;
+                t.by = "srv".to_string();
+                t.del = true;
+                t.pts.clear();
+                t.tx.clear();
+                back.push(t);
+            }
+        }
+    }
+    if !fix.is_empty() {
+        g.seq += 1;
+        g.mark_dirty();
+        let m = encode(&ServerMsg::Ops { seq: g.seq, ops: fix });
+        g.broadcast(&m, None); // includes the writer, whose copy is reset to the server's state
+    }
+    let seq = g.seq;
+    drop(g);
+    if !back.is_empty() {
+        let _ = tx.try_send(encode(&ServerMsg::Ops { seq, ops: back }));
+    }
+    let _ = tx.try_send(encode(&ServerMsg::Err { msg: "this room is read-only: enter the edit password to make changes".into() }));
+}
+
+/// Re-read this connection's rights when the room's password changed (set, changed or removed), and
+/// tell the client. Runs on a timer and before every write, so a revoked grant stops working at once.
+async fn refresh_rights(
+    app: &App,
+    room: &str,
+    oh: &Option<String>,
+    gh: &Option<String>,
+    seen: &mut u64,
+    rights: &mut Rights,
+    tx: &mpsc::Sender<Arc<String>>,
+) {
+    let g = app.gen(room);
+    if g == *seen {
+        return;
+    }
+    *seen = g;
+    if let Some(r) = app.rights(room, oh.clone(), gh.clone()).await {
+        if r.edit != rights.edit || r.pw != rights.pw {
+            let _ = tx.try_send(encode(&ServerMsg::Perm { edit: r.edit, pw: r.pw }));
+        }
+        *rights = r;
     }
 }

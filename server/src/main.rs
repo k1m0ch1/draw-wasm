@@ -5,7 +5,7 @@ mod state;
 mod statics;
 mod ws;
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 use state::{App, Config};
 use std::net::SocketAddr;
@@ -112,6 +112,8 @@ async fn main() {
         salt,
         docs: Default::default(),
         next_conn: Default::default(),
+        room_gen: Default::default(),
+        pw_sem: tokio::sync::Semaphore::new(2),
         build: statics::build_id(&statics),
         statics,
     });
@@ -121,6 +123,8 @@ async fn main() {
         .route("/healthz", get(api::healthz))
         .route("/api/rooms", post(api::claim_room))
         .route("/api/rooms/{room}", get(api::get_room).delete(api::delete_room))
+        .route("/api/rooms/{room}/password", put(api::set_password))
+        .route("/api/rooms/{room}/unlock", post(api::unlock))
         .route("/api/rooms/{room}/docs", post(api::create_doc))
         .route("/api/rooms/{room}/docs/{nano}", get(api::get_doc).delete(api::delete_doc))
         .route("/api/rooms/{room}/docs/{nano}/images", post(api::upload_image))

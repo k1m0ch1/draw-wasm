@@ -93,6 +93,8 @@ pub struct Board {
     pending: Option<Element>,
     edit_req: String,
     editing: String,
+    /// read-only: local mutations are refused (the server enforces this too)
+    ro: bool,
 }
 
 fn rid() -> String {
@@ -146,7 +148,18 @@ impl Board {
             pending: None,
             edit_req: String::new(),
             editing: String::new(),
+            ro: false,
         }
+    }
+    pub fn set_readonly(&mut self, ro: bool) {
+        self.ro = ro;
+        if ro {
+            self.cancel();
+        }
+        self.need_render = true;
+    }
+    pub fn readonly(&self) -> bool {
+        self.ro
     }
 
     // ------------------------------------------------------------ flags
@@ -381,6 +394,9 @@ impl Board {
     }
     /// Write an element (bumps version, sets writer, queues for sync, records history).
     fn put(&mut self, mut e: Element) {
+        if self.ro {
+            return;
+        }
         let id = e.id.clone();
         let old = self.els.get(&id).cloned();
         if let Some(tx) = self.tx.as_mut() {
@@ -439,6 +455,9 @@ impl Board {
     pub fn pointer_down(&mut self, sx: f64, sy: f64, shift: bool) {
         let p = self.s2w(sx, sy);
         self.cancel();
+        if self.ro && self.tool != "select" {
+            return;
+        }
         match self.tool.as_str() {
             "select" => self.down_select(p, shift),
             "rect" | "ellipse" | "diamond" => {
@@ -772,13 +791,13 @@ impl Board {
     pub fn double_click(&mut self, sx: f64, sy: f64) {
         let p = self.s2w(sx, sy);
         self.cancel();
-        if self.tool != "select" {
+        if self.tool != "select" || self.ro {
             return;
         }
         match self.hit_at(p, false, "") {
             Some(id) => {
                 let k = self.els[&id].k;
-                if matches!(k, Kind::Rect | Kind::Ellipse | Kind::Diamond | Kind::Text) {
+                if matches!(k, Kind::Rect | Kind::Ellipse | Kind::Diamond | Kind::Text | Kind::Arrow) {
                     self.set_sel(vec![id.clone()]);
                     self.edit_req = id;
                 }
@@ -808,7 +827,19 @@ impl Board {
     pub fn edit_info(&self, id: &str) -> String {
         let e = if id == "pending" { self.pending.as_ref() } else { self.els.get(id) };
         match e {
-            Some(e) => serde_json::to_string(e).unwrap_or_default(),
+            Some(e) => {
+                let mut e = e.clone();
+                if e.k == Kind::Arrow {
+                    // the editor sits on the middle of the arrow: expose its bounding box
+                    let (s, t) = arrow_ends(&self.els, &e);
+                    let b = norm(s, t);
+                    e.x = b.0;
+                    e.y = b.1;
+                    e.w = b.2;
+                    e.h = b.3;
+                }
+                serde_json::to_string(&e).unwrap_or_default()
+            }
             None => String::new(),
         }
     }
@@ -1266,25 +1297,39 @@ impl Board {
         self.outbox.insert(id.to_string());
         self.touch();
     }
-    pub fn undo(&mut self) {
+    /// Undo the last change. Returns what was undone ("add", "move", ...), or "" when there was nothing to undo.
+    pub fn undo(&mut self) -> String {
         self.cancel();
+        if self.ro {
+            return String::new();
+        }
         if let Some(ch) = self.undo.pop() {
             for c in &ch {
                 self.restore(&c.id, c.before.clone());
             }
+            let label = describe(&ch);
             self.redo.push(ch);
             self.fix_sel();
+            return label;
         }
+        String::new()
     }
-    pub fn redo(&mut self) {
+    /// Redo the last undone change. Returns what was redone, or "" when there was nothing to redo.
+    pub fn redo(&mut self) -> String {
         self.cancel();
+        if self.ro {
+            return String::new();
+        }
         if let Some(ch) = self.redo.pop() {
             for c in &ch {
                 self.restore(&c.id, c.after.clone());
             }
+            let label = describe(&ch);
             self.undo.push(ch);
             self.fix_sel();
+            return label;
         }
+        String::new()
     }
     fn fix_sel(&mut self) {
         let s: Vec<String> = self.sel.iter().filter(|i| self.els.get(*i).map_or(false, |e| !e.del)).cloned().collect();
@@ -1592,6 +1637,20 @@ impl Board {
                 if e.ah & 2 != 0 {
                     arrow_head(g, t, s, sw, &e.st, true);
                 }
+                if !e.tx.is_empty() && !self.edit_target(&e.id) {
+                    let fs = if e.fs > 0.0 { e.fs } else { 18.0 };
+                    let (mx, my) = ((s.0 + t.0) / 2.0, (s.1 + t.1) / 2.0);
+                    let lines: Vec<&str> = e.tx.split('\n').collect();
+                    let lh = fs * 1.3;
+                    let tw = lines.iter().map(|l| g.measure(l, fs)).fold(0.0, f64::max);
+                    let th = lh * lines.len() as f64;
+                    g.begin();
+                    g.rrect(mx - tw / 2.0 - 5.0, my - th / 2.0 - 2.0, tw + 10.0, th + 4.0, 6.0);
+                    g.fill("#ffffff");
+                    for (i, l) in lines.iter().enumerate() {
+                        g.text(l, mx, my - th / 2.0 + lh / 2.0 + i as f64 * lh, fs, &e.st, "center");
+                    }
+                }
             }
             Kind::Image => g.image(&e.img, e.x, e.y, e.w, e.h),
         }
@@ -1599,6 +1658,37 @@ impl Board {
     fn edit_target(&self, id: &str) -> bool {
         !self.editing.is_empty() && self.editing == id
     }
+}
+
+/// Short name of what a history entry did (for the undo/redo popup).
+fn describe(ch: &[Change]) -> String {
+    let live = |e: &Option<Element>| e.as_ref().map_or(false, |e| !e.del);
+    if ch.iter().any(|c| !live(&c.after) && live(&c.before)) {
+        return "delete".into();
+    }
+    if ch.iter().any(|c| !live(&c.before) && live(&c.after)) {
+        return "add".into();
+    }
+    for c in ch {
+        if let (Some(b), Some(a)) = (&c.before, &c.after) {
+            if (a.w - b.w).abs() > 1e-9 || (a.h - b.h).abs() > 1e-9 {
+                return "resize".into();
+            }
+            if (a.x - b.x).abs() > 1e-9 || (a.y - b.y).abs() > 1e-9 || a.pts != b.pts {
+                return "move".into();
+            }
+            if a.tx != b.tx {
+                return "text".into();
+            }
+            if a.st != b.st || a.fl != b.fl || a.sw != b.sw || a.fs != b.fs || a.ah != b.ah {
+                return "style".into();
+            }
+            if (a.z - b.z).abs() > 1e-9 {
+                return "reorder".into();
+            }
+        }
+    }
+    "edit".into()
 }
 
 fn diamond_path(g: &Gfx, b: BB) {

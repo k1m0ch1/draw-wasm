@@ -64,8 +64,19 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (doc, sha)
          );
          CREATE INDEX IF NOT EXISTS doc_images_sha ON doc_images(sha);
-         PRAGMA user_version = 1;",
-    )
+         CREATE TABLE IF NOT EXISTS grants (
+            room TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            hash TEXT NOT NULL,
+            created INTEGER NOT NULL,
+            PRIMARY KEY (room, hash)
+         );",
+    )?;
+    // room edit password (argon2id hash, NULL = no password); added after the first release
+    let has_pw: bool = conn.prepare("SELECT 1 FROM pragma_table_info('rooms') WHERE name='pw_hash'")?.exists([])?;
+    if !has_pw {
+        conn.execute_batch("ALTER TABLE rooms ADD COLUMN pw_hash TEXT;")?;
+    }
+    conn.execute_batch("PRAGMA user_version = 2;")
 }
 
 impl Db {
