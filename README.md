@@ -42,7 +42,10 @@ Admin tasks run locally inside the container (there is no network admin endpoint
 | `DRAW_DB` | `/data/draw.db` | SQLite file |
 | `DRAW_STATIC` | `/app/static` | built web bundle |
 | `PUBLIC_BASE_URL` | (from request) | base URL used in share links, e.g. `https://example.com` |
-| `DRAW_MAX_IMAGE_BYTES` | 4 MiB | per image |
+| `DRAW_MAX_IMAGE_BYTES` | 2 MiB | per image (not GIF); the client re-encodes to fit |
+| `DRAW_MAX_GIF_BYTES` | 3 MiB | per animated GIF, stored byte for byte; larger is refused |
+| `DRAW_MAX_EDITORS` | 15 | concurrent editors per document (the owner does not count); the rest view in a FIFO queue |
+| `DRAW_EDITOR_IDLE_SECS` | 600 | an editor idle this long yields the slot when somebody is waiting |
 | `DRAW_MAX_DOC_IMAGE_BYTES` | 24 MiB | images per document |
 | `DRAW_MAX_DOC_IMAGES` | 40 | images per document |
 | `DRAW_MAX_ELEMENTS` | 5000 | elements per document |

@@ -460,12 +460,25 @@ pub async fn upload_image(
     if body.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "empty body"));
     }
-    if body.len() > app.cfg.max_image_bytes {
-        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "image too large"));
-    }
     let Some(mime) = sniff(&body) else {
+        if body.len() > app.cfg.max_gif_bytes.max(app.cfg.max_image_bytes) {
+            return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "image too large"));
+        }
         return Err(err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "not a supported image (png, jpeg, gif, webp)"));
     };
+    if mime == "image/gif" {
+        if body.len() > app.cfg.max_gif_bytes {
+            return Err(err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("GIF too large: the limit is {} MB", app.cfg.max_gif_bytes / (1024 * 1024)),
+            ));
+        }
+    } else if body.len() > app.cfg.max_image_bytes {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("image too large: the limit is {} MB", app.cfg.max_image_bytes / (1024 * 1024)),
+        ));
+    }
     let sha = sha256_hex(&body);
     let (r, n, s, data) = (room, nano, sha.clone(), body.to_vec());
     let (max_n, max_b) = (app.cfg.max_doc_images, app.cfg.max_doc_image_bytes);

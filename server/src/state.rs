@@ -6,7 +6,7 @@ use proto::{Doc, Element, Peer, ServerMsg};
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub struct Config {
@@ -15,6 +15,10 @@ pub struct Config {
     pub static_dir: String,
     pub public_base_url: Option<String>,
     pub max_image_bytes: usize,
+    /// GIFs keep their original bytes, so they get their own (larger) cap
+    pub max_gif_bytes: usize,
+    pub max_editors: usize,
+    pub editor_idle_secs: u64,
     pub max_doc_image_bytes: i64,
     pub max_doc_images: i64,
     pub max_elements: usize,
@@ -36,7 +40,10 @@ impl Config {
             db_path: std::env::var("DRAW_DB").unwrap_or_else(|_| "/data/draw.db".into()),
             static_dir: std::env::var("DRAW_STATIC").unwrap_or_else(|_| "/app/static".into()),
             public_base_url: std::env::var("PUBLIC_BASE_URL").ok().filter(|s| !s.is_empty()),
-            max_image_bytes: env_num("DRAW_MAX_IMAGE_BYTES", 4 * 1024 * 1024),
+            max_image_bytes: env_num("DRAW_MAX_IMAGE_BYTES", 2 * 1024 * 1024),
+            max_gif_bytes: env_num("DRAW_MAX_GIF_BYTES", 3 * 1024 * 1024),
+            max_editors: env_num("DRAW_MAX_EDITORS", 15),
+            editor_idle_secs: env_num("DRAW_EDITOR_IDLE_SECS", 600),
             max_doc_image_bytes: env_num("DRAW_MAX_DOC_IMAGE_BYTES", 24 * 1024 * 1024),
             max_doc_images: env_num("DRAW_MAX_DOC_IMAGES", 40),
             max_elements: env_num("DRAW_MAX_ELEMENTS", 5000),
@@ -57,9 +64,32 @@ pub struct Rights {
     pub edit: bool,
 }
 
+/// An editor that left keeps priority for this long; its slot is held for HOLD.
+const GRACE: Duration = Duration::from_secs(60);
+const HOLD: Duration = Duration::from_secs(4);
+
 pub struct Client {
     pub peer: Peer,
     pub tx: mpsc::Sender<Arc<String>>,
+    /// the client's own random id (used only to recognise a reconnecting editor)
+    pub cid: String,
+    /// rights from the stored room state (password rules); a slot is needed on top of these
+    pub rights: Rights,
+    /// holds an editing slot (the owner always does and does not count against the limit)
+    pub editor: bool,
+    /// reconnected within the grace period: ahead of the queue
+    pub prio: bool,
+    /// join order, the FIFO key of the waitlist
+    pub order: u64,
+    pub last_act: Instant,
+    /// what this client was last told: (edit, pw, queue position, editors)
+    pub sent: Option<(bool, bool, u32, u32)>,
+}
+
+impl Client {
+    pub fn new(peer: Peer, tx: mpsc::Sender<Arc<String>>, cid: String, rights: Rights) -> Client {
+        Client { peer, tx, cid, rights, editor: false, prio: false, order: 0, last_act: Instant::now(), sent: None }
+    }
 }
 
 pub struct Inner {
@@ -73,6 +103,9 @@ pub struct Inner {
     pub total: usize,
     pub clients: HashMap<u64, Client>,
     pub deleted: bool,
+    /// editors that disconnected recently: (cid, when)
+    pub tickets: Vec<(String, Instant)>,
+    pub order_ctr: u64,
 }
 
 pub struct Active {
@@ -119,6 +152,100 @@ impl Inner {
         }
         for id in dead {
             self.clients.remove(&id);
+        }
+    }
+    /// Hand out editing slots (at most `cap` non-owner editors) in FIFO order of joining, returning
+    /// editors first; then tell every client whose state changed. This is the server-side truth for
+    /// who may write.
+    pub fn rebalance(&mut self, cap: usize, idle: Duration) {
+        let now = Instant::now();
+        self.tickets.retain(|(_, t)| now.duration_since(*t) < GRACE);
+        for c in self.clients.values_mut() {
+            if c.peer.owner {
+                c.editor = true;
+            } else if !c.rights.edit {
+                c.editor = false;
+            }
+        }
+        // idle editors give way when somebody is waiting
+        if self.clients.values().any(|c| !c.editor && c.rights.edit) {
+            let kicked: Vec<u64> = self
+                .clients
+                .iter()
+                .filter(|(_, c)| c.editor && !c.peer.owner && now.duration_since(c.last_act) > idle)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in kicked {
+                self.order_ctr += 1;
+                let o = self.order_ctr;
+                if let Some(c) = self.clients.get_mut(&id) {
+                    c.editor = false;
+                    c.prio = false;
+                    c.order = o;
+                    c.last_act = now;
+                }
+            }
+        }
+        let mut editors = self.clients.values().filter(|c| c.editor && !c.peer.owner).count();
+        let connected: std::collections::HashSet<String> = self.clients.values().map(|c| c.cid.clone()).collect();
+        let held = self.tickets.iter().filter(|(cid, t)| now.duration_since(*t) < HOLD && !connected.contains(cid)).count();
+        loop {
+            let free = cap.saturating_sub(editors);
+            if free == 0 {
+                break;
+            }
+            let first = self
+                .clients
+                .iter()
+                .filter(|(_, c)| !c.editor && c.rights.edit)
+                .min_by_key(|(_, c)| (!c.prio, c.order))
+                .map(|(id, c)| (*id, c.prio));
+            let Some((id, prio)) = first else { break };
+            if !prio && free <= held {
+                break; // that slot is kept for an editor who just dropped out
+            }
+            if let Some(c) = self.clients.get_mut(&id) {
+                c.editor = true;
+                c.prio = false;
+                c.last_act = now;
+            }
+            editors += 1;
+        }
+        let mut q: Vec<(bool, u64, u64)> =
+            self.clients.iter().filter(|(_, c)| !c.editor && c.rights.edit).map(|(id, c)| (!c.prio, c.order, *id)).collect();
+        q.sort();
+        let pos: HashMap<u64, u32> = q.iter().enumerate().map(|(i, (_, _, id))| (*id, i as u32 + 1)).collect();
+        for (id, c) in self.clients.iter_mut() {
+            let p = pos.get(id).copied().unwrap_or(0);
+            let st = (c.editor && c.rights.edit, c.rights.pw, p, editors as u32);
+            if c.sent == Some(st) {
+                continue;
+            }
+            if c.sent.map_or(true, |o| o.0 != st.0 || o.1 != st.1) {
+                let _ = c.tx.try_send(encode(&ServerMsg::Perm { edit: st.0, pw: st.1 }));
+            }
+            let _ = c.tx.try_send(encode(&ServerMsg::Role {
+                editor: st.0,
+                owner: c.peer.owner,
+                queued: p > 0,
+                pos: p,
+                editors: st.3,
+                cap: cap as u32,
+            }));
+            c.sent = Some(st);
+        }
+    }
+    pub fn is_editor(&self, conn: u64) -> bool {
+        self.clients.get(&conn).map_or(false, |c| c.editor && c.rights.edit)
+    }
+    pub fn touch(&mut self, conn: u64) {
+        if let Some(c) = self.clients.get_mut(&conn) {
+            c.last_act = Instant::now();
+        }
+    }
+    pub fn set_rights(&mut self, conn: u64, r: Rights) {
+        if let Some(c) = self.clients.get_mut(&conn) {
+            c.rights = r;
         }
     }
     pub fn snapshot_json(&self) -> String {
@@ -226,6 +353,8 @@ impl App {
                         total,
                         clients: HashMap::new(),
                         deleted: false,
+                        tickets: vec![],
+                        order_ctr: 0,
                     }),
                 });
                 map.insert(nano.to_string(), a.clone());
@@ -245,7 +374,14 @@ impl App {
             let peers: Vec<Peer> = g.clients.values().map(|c| c.peer.clone()).collect();
             let m = encode(&ServerMsg::Peer { peer: you.clone() });
             g.broadcast(&m, None);
+            g.order_ctr += 1;
+            client.order = g.order_ctr;
+            if let Some(i) = g.tickets.iter().position(|(c, _)| *c == client.cid) {
+                g.tickets.remove(i);
+                client.prio = true;
+            }
             g.clients.insert(conn, client);
+            g.rebalance(self.cfg.max_editors, Duration::from_secs(self.cfg.editor_idle_secs));
             ServerMsg::Snap {
                 seq: g.seq,
                 title: g.title.clone(),
@@ -262,7 +398,16 @@ impl App {
         let mut map = self.docs.lock().await;
         let (empty, gone) = {
             let mut g = lock(&a.inner);
-            let gone = g.clients.remove(&conn).map(|c| c.peer.id);
+            let removed = g.clients.remove(&conn);
+            if let Some(c) = &removed {
+                if c.editor && !c.peer.owner && !c.cid.is_empty() {
+                    let cid = c.cid.clone();
+                    g.tickets.retain(|(x, _)| *x != cid);
+                    g.tickets.push((cid, Instant::now()));
+                }
+            }
+            g.rebalance(self.cfg.max_editors, Duration::from_secs(self.cfg.editor_idle_secs));
+            let gone = removed.map(|c| c.peer.id);
             if let Some(id) = &gone {
                 let m = encode(&ServerMsg::Gone { id: id.clone() });
                 g.broadcast(&m, None);
@@ -322,7 +467,8 @@ impl App {
             let list: Vec<Arc<Active>> = self.docs.lock().await.values().cloned().collect();
             for a in list {
                 let due = {
-                    let g = lock(&a.inner);
+                    let mut g = lock(&a.inner);
+                    g.rebalance(self.cfg.max_editors, Duration::from_secs(self.cfg.editor_idle_secs));
                     g.dirty && (g.last_edit.elapsed().as_secs() >= 2 || g.first_dirty.elapsed().as_secs() >= 8)
                 };
                 if due {

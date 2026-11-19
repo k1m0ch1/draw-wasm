@@ -13,6 +13,7 @@ export class Gfx {
   clear(w, h) {
     const x = this.x;
     this.animNext = Infinity;
+    this.images.frameNo++;
     x.setTransform(1, 0, 0, 1, 0, 0);
     x.clearRect(0, 0, w, h);
     x.lineCap = 'round';
@@ -79,6 +80,7 @@ export class Gfx {
     const c = this.x;
     const e = this.images.get(hash);
     if (e && e.state === 'ok') {
+      e.last = this.images.frameNo;
       let src = e.img;
       if (e.anim) { // animated GIF: pick the frame for the current time and ask for a redraw when it ends
         const f = e.anim.frameAt(performance.now());
@@ -108,6 +110,7 @@ export class Gfx {
     c.strokeRect(x, y, w, h);
     c.restore();
     this.badge(e && e.state === 'err' ? 'Image unavailable, retrying...' : 'Loading image...', x, y, e && e.state === 'err' ? '#c92a2a' : '#868e96');
+    if (e) e.last = this.images.frameNo;
     if (!e) this.images.load(hash, () => this.onImageReady());
   }
 }

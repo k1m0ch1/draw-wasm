@@ -390,7 +390,7 @@ impl Board {
             }
             if !ch.is_empty() {
                 self.undo.push(ch);
-                if self.undo.len() > 200 {
+                if self.undo.len() > 100 {
                     self.undo.remove(0);
                 }
                 self.redo.clear();
@@ -1417,6 +1417,19 @@ impl Board {
         let v: Vec<&Element> = self.els.values().filter(|e| !e.del).collect();
         serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
     }
+    /// Rough bytes held by the document model (elements + history), for the memory readout in tests.
+    pub fn model_bytes(&self) -> f64 {
+        let el = |e: &Element| 160 + e.id.len() + e.by.len() + e.tx.len() + e.st.len() + e.fl.len() + e.img.len() + e.pts.len() * 8;
+        let a: usize = self.els.values().map(el).sum();
+        let h: usize = self
+            .undo
+            .iter()
+            .chain(self.redo.iter())
+            .flatten()
+            .map(|c| c.before.as_ref().map_or(0, el) + c.after.as_ref().map_or(0, el))
+            .sum();
+        (a + h) as f64
+    }
     pub fn live_count(&self) -> usize {
         self.els.values().filter(|e| !e.del).count()
     }
@@ -1488,9 +1501,10 @@ impl Board {
         self.reorder();
         g.clear(w * dpr, h * dpr);
         g.view(self.zoom * dpr, self.px * dpr, self.py * dpr);
-        let hovered_bind = match &self.g {
-            G::Arrow { sb, eb, .. } => vec![sb.clone(), eb.clone()],
-            G::Endpoint { id, .. } => self.els.get(id).map(|a| vec![a.sb.clone(), a.eb.clone()]).unwrap_or_default(),
+        // borrowed, not cloned: this runs every frame
+        let hovered_bind: Vec<&String> = match &self.g {
+            G::Arrow { sb, eb, .. } => vec![sb, eb],
+            G::Endpoint { id, .. } => self.els.get(id).map(|a| vec![&a.sb, &a.eb]).unwrap_or_default(),
             _ => vec![],
         };
         // visible world rect for culling
@@ -1543,7 +1557,7 @@ impl Board {
             _ => {}
         }
         for id in hovered_bind.iter().filter(|s| !s.is_empty()) {
-            if let Some(e) = self.els.get(id) {
+            if let Some(e) = self.els.get(*id) {
                 g.begin();
                 g.rrect(e.x - 5.0 / z, e.y - 5.0 / z, e.w + 10.0 / z, e.h + 10.0 / z, 8.0 / z);
                 g.stroke(ACCENT, 2.0 / z, 0.0);
@@ -1551,7 +1565,7 @@ impl Board {
         }
         // selection
         if self.tool == "select" {
-            let single = self.single_arrow().cloned();
+            let single = self.single_arrow();
             for id in &self.sel {
                 if let Some(e) = self.els.get(id) {
                     if e.k == Kind::Arrow {
@@ -1564,7 +1578,7 @@ impl Board {
                 }
             }
             if let Some(a) = single {
-                let (s, t) = arrow_ends(&self.els, &a);
+                let (s, t) = arrow_ends(&self.els, a);
                 for q in [s, t] {
                     g.begin();
                     g.ell(q.0, q.1, 5.0 / z, 5.0 / z);

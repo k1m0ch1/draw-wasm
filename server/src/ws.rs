@@ -72,9 +72,9 @@ fn secret_hash(t: &str) -> Option<String> {
 async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, key: String) {
     // 1. hello (must arrive quickly)
     let hello = tokio::time::timeout(Duration::from_secs(10), sock.recv()).await;
-    let (name, token, build, grant) = match hello {
+    let (name, token, build, grant, cid) = match hello {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(&t) {
-            Ok(ClientMsg::Hello { cid, name, token, build, grant, .. }) if proto::valid_id(&cid) => (name, token, build, grant),
+            Ok(ClientMsg::Hello { cid, name, token, build, grant, .. }) if proto::valid_id(&cid) => (name, token, build, grant, cid),
             _ => {
                 send_err(&mut sock, "expected hello").await;
                 return;
@@ -84,11 +84,11 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     };
     // Rights are decided here from the stored state only; nothing the client says about itself counts.
     let (oh, gh) = (secret_hash(&token), secret_hash(&grant));
-    let Some(mut rights) = app.rights(&room, oh.clone(), gh.clone()).await else {
+    let Some(rights) = app.rights(&room, oh.clone(), gh.clone()).await else {
         send_err(&mut sock, "document not found").await;
         return;
     };
-    let mut seen_gen = app.gen(&room);
+    let seen_gen0 = app.gen(&room);
     // empty name = the server picks a random face emoji when the client joins the document
     let name = match name_check(&name) {
         NameCheck::Ok(n) => n,
@@ -103,7 +103,7 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     // the participant id other clients see is chosen by the server: it cannot be spoofed or collide
     let pid = format!("p{}", random_id(11));
     let peer = Peer { id: pid.clone(), name, color: random_color(), owner: rights.owner };
-    let Some((active, snap)) = app.join(&room, &nano, conn, Client { peer, tx: tx.clone() }).await else {
+    let Some((active, snap)) = app.join(&room, &nano, conn, Client::new(peer, tx.clone(), cid, rights)).await else {
         send_err(&mut sock, "document not found").await;
         return;
     };
@@ -112,13 +112,14 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
         let _ = sock.send(Message::Text(encode(&ServerMsg::Reload { build: app.build.clone() }).as_str().into())).await;
     }
 
-    let _ = sock.send(Message::Text(encode(&ServerMsg::Perm { edit: rights.edit, pw: rights.pw }).as_str().into())).await;
+    // Perm and Role (editor / viewer + queue position) were queued by the join and follow the snapshot
     let first = encode(&snap);
     if sock.send(Message::Text(first.as_str().into())).await.is_err() {
         app.leave(&active, conn).await;
         return;
     }
 
+    let mut seen_gen = seen_gen0;
     let mut ops_bucket = LocalBucket::new(60.0, 30.0);
     let mut cur_bucket = LocalBucket::new(40.0, 30.0);
     let mut violations = 0u32;
@@ -128,7 +129,7 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                refresh_rights(&app, &room, &oh, &gh, &mut seen_gen, &mut rights, &tx).await;
+                refresh_rights(&app, &active, conn, &room, &oh, &gh, &mut seen_gen).await;
             }
             out = rx.recv() => {
                 match out {
@@ -171,7 +172,9 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
                     ClientMsg::Cur { x, y } => {
                         if !cur_bucket.take() || !x.is_finite() || !y.is_finite() { continue; }
                         let m = encode(&ServerMsg::Cur { id: pid.clone(), x, y });
-                        lock(&active.inner).broadcast(&m, Some(conn));
+                        let mut g = lock(&active.inner);
+                        g.touch(conn);
+                        g.broadcast(&m, Some(conn));
                     }
                     ClientMsg::Save => {
                         app.flush(&active).await;
@@ -189,9 +192,15 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
                             let _ = tx.try_send(encode(&ServerMsg::Err { msg: "too many ops in one message".into() }));
                             continue;
                         }
-                        refresh_rights(&app, &room, &oh, &gh, &mut seen_gen, &mut rights, &tx).await;
-                        if !rights.edit {
-                            reject_ops(&active, &tx, ops);
+                        refresh_rights(&app, &active, conn, &room, &oh, &gh, &mut seen_gen).await;
+                        let allowed = {
+                            let mut g = lock(&active.inner);
+                            let a = g.is_editor(conn);
+                            if a { g.touch(conn); }
+                            a
+                        };
+                        if !allowed {
+                            reject_ops(&active, &tx, ops, rights.edit);
                             continue;
                         }
                         apply_ops(&app, &active, conn, &tx, ops);
@@ -257,7 +266,7 @@ fn apply_ops(app: &App, active: &Active, conn: u64, tx: &mpsc::Sender<Arc<String
 /// A read-only connection tried to write. Nothing is accepted; the writer's copy is put back to the
 /// server's state with a newer version so the client converges (and everybody else is unaffected
 /// content-wise). The client is told why.
-fn reject_ops(active: &Active, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>) {
+fn reject_ops(active: &Active, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>, may_edit: bool) {
     let mut g = lock(&active.inner);
     let mut fix: Vec<Element> = vec![]; // known elements: the stored state, re-versioned (goes to everyone)
     let mut back: Vec<Element> = vec![]; // unknown elements: a tombstone, for the sender only
@@ -295,19 +304,25 @@ fn reject_ops(active: &Active, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>
     if !back.is_empty() {
         let _ = tx.try_send(encode(&ServerMsg::Ops { seq, ops: back }));
     }
-    let _ = tx.try_send(encode(&ServerMsg::Err { msg: "this room is read-only: enter the edit password to make changes".into() }));
+    let why = if may_edit {
+        "you are viewing: all editing slots are taken, you will be promoted when one frees up"
+    } else {
+        "this room is read-only: enter the edit password to make changes"
+    };
+    let _ = tx.try_send(encode(&ServerMsg::Err { msg: why.into() }));
 }
 
-/// Re-read this connection's rights when the room's password changed (set, changed or removed), and
-/// tell the client. Runs on a timer and before every write, so a revoked grant stops working at once.
+/// Re-read this connection's rights when the room's password changed (set, changed or removed); the
+/// slot logic then tells the client. Runs on a timer and before every write, so a revoked grant stops
+/// working at once.
 async fn refresh_rights(
     app: &App,
+    active: &Active,
+    conn: u64,
     room: &str,
     oh: &Option<String>,
     gh: &Option<String>,
     seen: &mut u64,
-    rights: &mut Rights,
-    tx: &mpsc::Sender<Arc<String>>,
 ) {
     let g = app.gen(room);
     if g == *seen {
@@ -315,9 +330,8 @@ async fn refresh_rights(
     }
     *seen = g;
     if let Some(r) = app.rights(room, oh.clone(), gh.clone()).await {
-        if r.edit != rights.edit || r.pw != rights.pw {
-            let _ = tx.try_send(encode(&ServerMsg::Perm { edit: r.edit, pw: r.pw }));
-        }
-        *rights = r;
+        let mut a = lock(&active.inner);
+        a.set_rights(conn, r);
+        a.rebalance(app.cfg.max_editors, Duration::from_secs(app.cfg.editor_idle_secs));
     }
 }

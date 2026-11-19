@@ -43,6 +43,13 @@ const S = {
   edit: true, pw: false, grant: '',
 };
 window.__draw = S; // inspection hook for tests; contains no secrets
+/** Memory in use by this page: wasm linear memory, JS heap, and the decoded-image caches (bytes). */
+S.memory = () => {
+  const st = S.images.stats();
+  const wasm = S.wasm && S.wasm.memory ? S.wasm.memory.buffer.byteLength : 0;
+  const heap = (performance.memory && performance.memory.usedJSHeapSize) || 0;
+  return { wasm, heap, model: S.board ? S.board.model_bytes() : 0, bitmapBytes: st.pixels * 4, bitmaps: st.bitmaps, gifBytes: st.gifBytes, gifs: st.gifs, total: wasm + heap };
+};
 
 function toast(msg, ms = 3500) {
   const t = $('toast');
@@ -201,6 +208,7 @@ function frame() {
     if (b.take_render()) {
       S.renders = (S.renders || 0) + 1;
       b.render(S.gfx, S.w, S.h, S.dpr);
+      S.images.trim();
       positionCursors();
       $('zlabel').textContent = Math.round(b.zoom() * 100) + '%';
       $('btn-undo').classList.toggle('dim', !b.can_undo());
@@ -217,7 +225,7 @@ function frame() {
 }
 let lastSent = 0;
 function flushOps() {
-  if (route.kind !== 'doc' || !S.wsOpen || S.reloadNeeded || !S.board.has_ops()) return;
+  if (route.kind !== 'doc' || !S.wsOpen || S.reloadNeeded || !S.role || !S.board.has_ops()) return; // wait for the server's role message
   if (!S.edit) { S.board.take_ops(); return; } // read-only: nothing to send (the server would refuse it anyway)
   const now = performance.now();
   if (now - lastSent < 40) return;
@@ -758,7 +766,7 @@ function connect() {
     if (S.ws !== ws) return;
     S.wsOpen = false;
     clearInterval(S.pingT);
-    S.peers.clear(); S.cursors.clear(); renderPeers();
+    S.peers.clear(); S.cursors.clear(); S.role = null; renderPeers();
     if (S.stopped) return;
     // exponential backoff with jitter, up to ~30 s; a socket that opens but is rejected counts as a failure
     const wait = Math.min(30000, 500 * 2 ** Math.min(S.wsTry++, 7)) * (0.75 + Math.random() * 0.5);
@@ -819,6 +827,7 @@ async function onServer(m) {
   switch (m.t) {
     case 'reload': onReload(m); break;
     case 'perm': setPerm(m.edit, m.pw); break;
+    case 'role': setRole(m); break;
     case 'snap': {
       if (S.reloadNeeded) break; // outdated build: keep local state untouched until the reload
       S.wsTry = 0;
@@ -832,7 +841,8 @@ async function onServer(m) {
       b.merge_snapshot(JSON.stringify(m.els));
       S.wsOpen = true;
       renderPeers();
-      setStatus(S.edit ? 'Live' : 'Live (read-only)');
+      roleUi();
+      if (S.wsOpen && !S.role) setStatus(S.edit ? 'Live' : 'Live (read-only)');
       if (!S.fitted) { S.fitted = true; b.fit(S.w, S.h); }
       lastSent = 0;
       uploadImages(JSON.parse(b.images_used())); // bytes held only by this browser reach the server
@@ -946,11 +956,32 @@ function setPerm(edit, pw) {
   S.pw = !!pw;
   S.board?.set_readonly(!S.edit);
   document.body.classList.toggle('ro', !S.edit);
-  $('rochip').classList.toggle('hidden', S.edit || route.kind !== 'doc');
   $('btn-del').classList.toggle('hidden', !S.edit || route.kind !== 'doc');
   $('btn-save').classList.toggle('hidden', route.kind === 'doc' && !S.edit);
-  if (!S.edit) { commitEdit(); setStatus('Read-only: enter the password to edit'); }
-  else if (S.wsOpen) { setStatus('Live'); uploadImages(JSON.parse(S.board.images_used())); }
+  if (!S.edit) commitEdit();
+  else if (S.wsOpen) uploadImages(JSON.parse(S.board.images_used()));
+  roleUi();
+}
+/** Editing slot state from the server: 'Editing (12/15)' or 'Viewing - queue position 3'. The server enforces it. */
+function setRole(m) {
+  const was = S.role;
+  S.role = m;
+  if (was && !was.editor && m.editor) toast('Editing', 4000); // promoted from the waitlist: no reload needed
+  roleUi();
+}
+function roleUi() {
+  if (route.kind !== 'doc') return;
+  const r = S.role;
+  const queued = !!(r && r.queued && !S.edit);
+  $('rochip').classList.toggle('hidden', S.edit || queued);
+  const chip = $('rolechip');
+  let txt = '';
+  if (S.edit && r) txt = r.owner ? 'Editing (owner)' : `Editing (${r.editors}/${r.cap})`;
+  else if (queued) txt = `Viewing - queue position ${r.pos}`;
+  chip.textContent = txt;
+  chip.classList.toggle('hidden', !txt);
+  chip.classList.toggle('queued', queued);
+  if (S.wsOpen) setStatus(S.edit ? 'Live' : queued ? 'Live (viewing: waiting for an editing slot)' : 'Read-only: enter the password to edit');
 }
 /** Ask for the room password; on success the server's grant is remembered in this browser. */
 function unlockDialog(after) {
@@ -1057,7 +1088,8 @@ async function main() {
   buildStyle();
   bindButtons();
   if (route.kind === 'room') { await roomPage(); return; }
-  await init();
+  S.wasm = await init();
+  S.images.onNote = (m) => toast(m, 6000);
   S.board = new Board(S.cid);
   S.gfx = new Gfx(S.canvas, S.images);
   S.gfx.onImageReady = () => S.board.invalidate();

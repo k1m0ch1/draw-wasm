@@ -103,7 +103,7 @@ async fn main() {
     let mut salt = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
     let statics = statics::load(&cfg.static_dir);
-    let max_body = cfg.max_image_bytes.max(cfg.max_doc_bytes) + 16 * 1024;
+    let max_body = cfg.max_image_bytes.max(cfg.max_gif_bytes).max(cfg.max_doc_bytes) + 16 * 1024;
     let addr = cfg.addr.clone();
     let app = Arc::new(App {
         cfg,

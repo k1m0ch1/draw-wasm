@@ -5,9 +5,15 @@ import { idb } from './db.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
 
+// Memory budgets (PLAN item 52)
+export const PIXEL_BUDGET = 16e6; // decoded bitmap pixels (x4 bytes = 64 MB) kept in the LRU cache
+export const GIF_FRAME_BUDGET = 64e6; // bytes of decoded GIF frames, TOTAL across all GIFs
+const gifMem = { bytes: 0 };
+
 /** Animated GIF as decoded frames with their own delays (ImageDecoder). */
 class FrameAnim {
-  constructor(frames) {
+  constructor(frames, bytes) {
+    this.bytes = bytes;
     this.frames = frames;
     this.total = frames.reduce((a, f) => a + f.dur, 0) || 1;
     this.t0 = performance.now();
@@ -22,17 +28,24 @@ class FrameAnim {
     }
     return { src: this.frames[0].bmp, until: now + 50 };
   }
+  free() {
+    for (const f of this.frames) { try { f.bmp.close(); } catch { /* already closed */ } }
+    gifMem.bytes -= this.bytes;
+    this.bytes = 0;
+    this.frames = [];
+  }
 }
 /** Fallback: an off-screen <img> animates the GIF itself; the canvas redraws it ~20 times a second. */
 class ImgAnim {
   constructor(img) { this.img = img; }
   frameAt(now) { return { src: this.img, until: now + 50 }; }
+  free() { try { URL.revokeObjectURL(this.img.src); this.img.remove(); } catch { /* ignore */ } }
 }
 const isGifBlob = async (b) => {
   const h = new Uint8Array(await b.slice(0, 6).arrayBuffer());
   return h.length >= 6 && String.fromCharCode(...h.slice(0, 4)) === 'GIF8';
 };
-/** The animation of a GIF blob, or null when it is not an animated GIF. */
+/** The animation of a GIF blob, or null when it is not an animated GIF. Throws 'budget' when the global frame cache is full. */
 async function makeAnim(blob) {
   if (!(await isGifBlob(blob))) return null;
   if (typeof ImageDecoder !== 'undefined') {
@@ -43,17 +56,24 @@ async function makeAnim(blob) {
       if (n <= 1) { dec.close(); return null; }
       const frames = [];
       let px = 0;
-      for (let i = 0; i < n; i++) {
-        const { image } = await dec.decode({ frameIndex: i });
-        px += image.displayWidth * image.displayHeight * 4;
-        if (px > 256e6) { image.close(); throw new Error('too big for frame cache'); }
-        const bmp = await createImageBitmap(image);
-        frames.push({ bmp, dur: Math.max(20, (image.duration || 100000) / 1000) });
-        image.close();
-      }
+      const undo = () => { for (const f of frames) f.bmp.close(); gifMem.bytes -= px; dec.close(); };
+      try {
+        for (let i = 0; i < n; i++) {
+          const { image } = await dec.decode({ frameIndex: i });
+          const fb = image.displayWidth * image.displayHeight * 4;
+          if (gifMem.bytes + fb > GIF_FRAME_BUDGET) { image.close(); throw new Error('budget'); }
+          gifMem.bytes += fb; px += fb; // reserved first, so GIFs decoding in parallel cannot overshoot
+          const bmp = await createImageBitmap(image);
+          frames.push({ bmp, dur: Math.max(20, (image.duration || 100000) / 1000) });
+          image.close();
+        }
+      } catch (e) { undo(); throw e; }
       dec.close();
-      return new FrameAnim(frames);
-    } catch { /* fall through to the <img> approach */ }
+      return new FrameAnim(frames, px);
+    } catch (e) {
+      if (e && e.message === 'budget') throw e;
+      /* fall through to the <img> approach */
+    }
   }
   const img = new Image();
   img.decoding = 'async';
@@ -69,17 +89,55 @@ export class Images {
     this.map = new Map(); // hash -> {state: loading|ok|err, img}
     this.up = new Map(); // hash -> {state: uploading|retrying|ok|failed, msg}
     this.onChange = () => {};
+    this.onNote = () => {};
+    this.frameNo = 0; // render counter: entries drawn in the current frame are on screen and never evicted
     this.running = 0;
     this.waiting = [];
   }
   get(hash) { return this.map.get(hash); }
   set(hash, bmp, blob) {
-    const entry = { state: 'ok', img: bmp, anim: null };
+    const entry = { state: 'ok', img: bmp, anim: null, hash, last: this.frameNo + 1 };
     this.map.set(hash, entry);
     if (blob) this.animate(entry, blob);
   }
   animate(entry, blob) {
-    makeAnim(blob).then((a) => { if (a) { entry.anim = a; this.onChange(); } }).catch(() => {});
+    makeAnim(blob).then((a) => {
+      if (!a) return;
+      if (this.map.get(entry.hash) !== entry) { a.free(); return; } // evicted meanwhile
+      entry.anim = a;
+      this.onChange();
+    }).catch((e) => {
+      if (e && e.message === 'budget') this.onNote('Too many animated GIFs for memory: this one is shown as a still image');
+    });
+  }
+  pixels(e) { return e.img ? e.img.width * e.img.height : 0; }
+  /** Drop the least recently drawn bitmaps until the decoded pixels fit the budget. Images drawn in the current frame are never evicted. */
+  trim() {
+    let total = 0;
+    const cand = [];
+    for (const [h, e] of this.map) {
+      if (e.state !== 'ok' || !e.img) continue;
+      total += this.pixels(e);
+      if (e.last !== this.frameNo) cand.push([h, e]);
+    }
+    if (total <= PIXEL_BUDGET) return;
+    cand.sort((a, b) => a[1].last - b[1].last);
+    for (const [h, e] of cand) {
+      if (total <= PIXEL_BUDGET) break;
+      total -= this.pixels(e);
+      this.drop(h, e);
+    }
+  }
+  /** Release a decoded image; the bytes stay in IndexedDB and it is decoded again when drawn. */
+  drop(h, e) {
+    if (e.anim) { e.anim.free(); e.anim = null; }
+    try { e.img.close(); } catch { /* ignore */ }
+    this.map.delete(h);
+  }
+  stats() {
+    let px = 0, n = 0, anim = 0;
+    for (const e of this.map.values()) if (e.state === 'ok' && e.img) { px += this.pixels(e); n++; if (e.anim) anim++; }
+    return { bitmaps: n, pixels: px, gifs: anim, gifBytes: gifMem.bytes };
   }
   /** Upload state shown on the element ({state, msg}), or undefined when nothing is pending or wrong. */
   status(hash) {
@@ -98,7 +156,7 @@ export class Images {
   /** Decode an image for drawing. A missing image is retried: its author may still be uploading it. */
   load(hash, done) {
     if (this.map.has(hash)) return;
-    const entry = { state: 'loading', img: null, tries: 0 };
+    const entry = { state: 'loading', img: null, tries: 0, hash, last: this.frameNo + 1 };
     this.map.set(hash, entry);
     (async () => {
       for (let i = 0; ; i++) {
@@ -106,6 +164,7 @@ export class Images {
           const b = await this.blob(hash);
           entry.img = await createImageBitmap(b);
           entry.state = 'ok';
+          entry.last = this.frameNo + 1;
           done();
           this.animate(entry, b);
           return;
@@ -175,19 +234,23 @@ function toBlob(c, type, q) {
 
 const OK_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 export const MAX_EDGE = 2000;
-const MAX_BYTES = 3.9 * 1024 * 1024;
-const GIF_MAX_BYTES = 4 * 1024 * 1024 - 8192; // just under the server cap: GIFs are stored unchanged
+export const MAX_BYTES = 2 * 1024 * 1024 - 8192; // just under the server cap (2 MB)
+export const GIF_MAX_BYTES = 3 * 1024 * 1024 - 8192; // just under the server cap (3 MB): GIFs are stored unchanged
 
 /** Downscale (max edge ~2000px) and re-encode to WebP/JPEG; shrinks further until it fits the server cap. */
 export async function prepareImage(file) {
   const bmp = await createImageBitmap(file);
   const w = bmp.width, h = bmp.height;
   const gif = file.type === 'image/gif' || (await isGifBlob(file));
-  if (gif && file.size <= GIF_MAX_BYTES) {
+  if (gif) {
+    if (file.size > GIF_MAX_BYTES) {
+      bmp.close();
+      throw new Error(`This GIF is ${(file.size / 1048576).toFixed(1)} MB: GIFs are limited to 3 MB. Please use a smaller GIF.`);
+    }
     // keep the original bytes: re-encoding would drop the animation
     return { blob: file, bmp, w, h, hash: await sha256(file), animated: true };
   }
-  let note = gif ? 'This GIF is too large to keep animated: it was added as a still image' : '';
+  let note = '';
   let scale = Math.min(1, MAX_EDGE / Math.max(w, h));
   let blob = file;
   const type = OK_TYPES.includes(file.type) ? file.type : '';
@@ -212,8 +275,10 @@ export async function prepareImage(file) {
     blob = out;
     q = Math.max(0.4, q - 0.1);
   }
-  if (blob.size > MAX_BYTES) throw new Error('Image is too large even after shrinking');
+  if (blob.size > MAX_BYTES) throw new Error('Image is too large even after shrinking to fit 2 MB');
+  if (blob !== file) note = `Image was downscaled to fit 2 MB (${(file.size / 1048576).toFixed(1)} MB -> ${(blob.size / 1048576).toFixed(1)} MB)`;
   const final = blob === file ? bmp : await createImageBitmap(blob);
+  if (blob !== file) bmp.close();
   const hash = await sha256(blob);
   return { blob, bmp: final, w: final.width, h: final.height, hash, note };
 }

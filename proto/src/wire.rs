@@ -55,6 +55,9 @@ pub enum ServerMsg {
     Pong,
     /// What this connection may do. Computed by the server only; sent before the snapshot and whenever it changes.
     Perm { edit: bool, pw: bool },
+    /// Editing slot state: editors hold one of `cap` slots (the owner does not count); the rest view
+    /// and wait in a FIFO queue (`pos` is 1-based, 0 when not queued).
+    Role { editor: bool, owner: bool, queued: bool, pos: u32, editors: u32, cap: u32 },
     Saved { seq: u64 },
     Err { msg: String },
     Deleted,
