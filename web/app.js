@@ -188,7 +188,7 @@ function syncStyle() {
   vis(2, none || k.some((x) => !['text', 'image'].includes(x)));
   vis(3, none || k.includes('arrow'));
   vis(4, none || k.some((x) => ['rect', 'ellipse', 'diamond', 'text'].includes(x)));
-  vis(5, true); // Convert: always there (pressing it with nothing selected shows a hint)
+  vis(5, none || k.includes('text')); // Convert: only where it applies, so the panel stays short over shape handles
   vis(6, info.n > 0);
 }
 
