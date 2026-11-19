@@ -270,7 +270,7 @@ const pixel = (p, x, y) => p.evaluate(([x, y]) => { const c = document.getElemen
   const r0 = await O.evaluate(() => window.__draw.renders); await sleep(2000); const r1 = await O.evaluate(() => window.__draw.renders);
   ok(r1 - r0 <= 2, `43: a static image causes no redraws when idle (${r1 - r0} in 2 s)`);
   await O.evaluate(() => { const b = window.__draw.board; b.select_all(); b.delete_selected(); });
-  await setClip(O, gif); await O.keyboard.press('Control+v'); await sleep(1200);
+  { const fc3 = O.waitForEvent('filechooser'); await O.evaluate(() => document.getElementById('filepick').click()); await (await fc3).setFiles({ name: 'b.gif', mimeType: 'image/gif', buffer: gif }); await sleep(1200); }
   await O.evaluate(() => window.__draw.board.pan(5000, 5000)); await sleep(500);
   const q0 = await O.evaluate(() => window.__draw.renders); await sleep(2000); const q1 = await O.evaluate(() => window.__draw.renders);
   ok(q1 - q0 <= 2, `43: an animated GIF that is off screen causes no redraws (${q1 - q0} in 2 s)`);
@@ -352,8 +352,9 @@ const pixel = (p, x, y) => p.evaluate(([x, y]) => { const c = document.getElemen
   // the other joiner (C) never entered the password: still read-only
   ok(await C.evaluate(() => document.body.classList.contains('ro')), '46: a browser that never entered the password stays read-only');
   // room page
-  const [ctxR, R] = await L.open(browser, BASE + '/' + ROOM);
-  await R.waitForSelector('#doclist'); await sleep(300);
+  const ctxR = await browser.newContext({ viewport: { width: 1000, height: 700 } });
+  const R = await ctxR.newPage(); await R.goto(BASE + '/' + ROOM);
+  await R.waitForSelector('#doclist'); await sleep(600);
   ok((await R.isVisible('#room-ro')) && (await R.isVisible('#room-unlock')) && !(await R.isVisible('#new-doc')), '46: the room page is read-only for visitors (no New document, shows Enter password)');
   // the owner changes the password: the joiner's grant dies, live and on reload
   await O.click('#btn-pw'); await O.fill('#pw-input', 'correct-battery-2'); await O.click('#pw-set');

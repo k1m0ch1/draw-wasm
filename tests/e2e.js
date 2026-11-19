@@ -68,13 +68,13 @@ const tool = (p, t) => p.click(`#toolbar [data-tool="${t}"]`);
   await tool(page, 'select');
   await page.mouse.dblclick(960, 250); await sleep(150);
   await page.keyboard.type('inside');
-  await page.keyboard.press('Escape');
+  await page.keyboard.press('Enter'); // Enter commits, Esc cancels (item 45)
   s = await summary(page);
   ok(s.some((e) => e.k === 'Diamond' && e.tx === 'inside'), 'text inside shape');
   // edit text
   await page.mouse.dblclick(960, 250); await sleep(150);
   await page.keyboard.press('Control+a'); await page.keyboard.type('changed');
-  await page.keyboard.press('Escape');
+  await page.keyboard.press('Enter');
   s = await summary(page);
   ok(s.some((e) => e.k === 'Diamond' && e.tx === 'changed'), 'edit text');
   await page.screenshot({ path: SHOTS + '/local-shapes.png' });

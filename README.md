@@ -3,6 +3,7 @@
 A light, fast browser whiteboard in the spirit of Whimsical: one infinite canvas, a Rust engine compiled to WebAssembly, a small Rust server with SQLite, and live collaboration over WebSocket.
 
 ## Features
+- Names are optional: joiners without a name get a random face emoji. Ctrl+Z / Ctrl+Y show an Undo/Redo popup. A double-click labels shapes and arrows. Animated GIFs keep their animation (original bytes are stored).
 - Tools: select, rectangle, ellipse, diamond, arrow (binds to shapes and follows them), smoothed pencil, text (free-standing or inside shapes via double-click), images (paste or drop).
 - Multi-select, move, resize, delete, duplicate, undo/redo, z-order, colour/stroke presets, arrowheads.
 - Zoom 10%..400% (wheel, pinch, buttons, zoom to cursor), pan (space-drag, middle mouse, two fingers), zoom to fit. Touch friendly.
@@ -55,7 +56,9 @@ Deployment scripts read environment-specific values from the environment or an u
 
 ## Security model
 - Cloud documents and rooms are public by design: the URL is the capability to view and edit.
-- Claiming a room gives the browser a random owner token (kept in IndexedDB); the server stores only its SHA-256. Only the owner can delete documents or the room; everyone else can draw.
+- Claiming a room gives the browser a random owner token (kept in IndexedDB); the server stores only its SHA-256.
+- **Edit password (optional)**: by default everyone with the link can view, edit and delete. The owner can set a room password; then everyone without it is read-only (view, pan, zoom, cursors) and only the owner and holders of a server-issued edit grant may write. The password is stored as an argon2id hash; a successful unlock returns a random grant bound to that room (only its SHA-256 is stored, revoked whenever the password changes). Enforcement is server-side on the WebSocket, image upload, document create/delete and room changes. Unlock attempts are rate limited per client and per room. Changing or removing the password, and deleting the room, need the owner token.
+- Rights are always computed on the server from stored state; flags a client sends about itself (owner, edit) are ignored. Participant ids are assigned by the server.
 - IP addresses are never stored. A salted hash (salt regenerated at every start, memory only) is used solely for rate limiting.
 - Every input is validated (ids, numbers, colours, sizes). Images are validated by magic bytes, served with the sniffed type, `nosniff` and a sandbox CSP. SVG is not accepted.
 - SQL is always parameterised. Output is escaped (DOM text nodes only). CSP forbids external hosts and inline script.
@@ -65,7 +68,7 @@ Deployment scripts read environment-specific values from the environment or an u
 `engine_bg.wasm` must stay at or below 2 MiB (2,097,152 bytes); `scripts/build-web.sh` fails otherwise. Release profile: `opt-level="z"`, LTO, one codegen unit, `panic="abort"`, strip, then `wasm-opt -Oz`. The server is served gzip-compressed by the reverse proxy.
 
 ## Tests
-`BASE=http://127.0.0.1:8080 node tests/e2e.js` (Playwright with Chrome) drives the UI end to end. `cargo test -p draw-proto` runs unit tests.
+`BASE=http://127.0.0.1:8080 node tests/e2e.js` (Playwright with Chrome) drives the UI end to end. `cargo test -p draw-proto` runs unit tests. Against a deployed instance: `tests/multiuser.js` (every feature as owner and joiners), `tests/round7.js` (names, undo popup, labels, zoom, GIF, password), `tests/security.js` (authorisation / IDOR), `tests/abuse.js`, `tests/collab.js`, `tests/round5.js`. Test rooms start with `zz-test-` and are removed with `draw-server admin purge-prefix zz-test-`.
 
 ## License
 MIT, see `LICENSE`.
