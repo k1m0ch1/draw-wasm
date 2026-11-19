@@ -191,8 +191,16 @@ pub fn route(els: &Els, a: &Element, full: bool) -> Vec<P> {
     }
     let sd = n.sd.unwrap_or_else(|| axis_dir(n.s, n.e));
     let ed = n.ed.unwrap_or_else(|| axis_dir(n.e, n.s));
-    let ss = if n.sd.is_some() { STUB } else { 0.0 };
-    let es = if n.ed.is_some() { STUB } else { 0.0 };
+    let mut ss = if n.sd.is_some() { STUB } else { 0.0 };
+    let mut es = if n.ed.is_some() { STUB } else { 0.0 };
+    if n.sd.is_some() && n.ed.is_some() {
+        // facing sides closer than two stubs: share the gap so the stub tips never cross
+        let along = ((n.e.0 - n.s.0) * sd.0 + (n.e.1 - n.s.1) * sd.1).max(0.0);
+        if sd.0 * ed.0 + sd.1 * ed.1 < 0.0 && along < ss + es {
+            ss = along / 2.0;
+            es = along / 2.0;
+        }
+    }
     let s1 = (n.s.0 + sd.0 * ss, n.s.1 + sd.1 * ss);
     let e1 = (n.e.0 + ed.0 * es, n.e.1 + ed.1 * es);
     let found = if full { search(els, s1, sd, e1, ed) } else { None };
@@ -676,6 +684,13 @@ mod tests {
             assert!(!crosses(&r, e), "crosses {}: {:?}", e.id, r);
         }
         assert!(r.len() <= 6, "{:?}", r);
+    }
+
+    #[test]
+    fn close_shapes_get_a_straight_short_arrow() {
+        let els = world(vec![node("a", 0.0, 0.0), node("b", 150.0, 0.0), arrow("a", "b")]);
+        let r = route(&els, &els["ab"], true);
+        assert_eq!(r.len(), 2, "{:?}", r);
     }
 
     #[test]
