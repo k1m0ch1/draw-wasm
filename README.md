@@ -67,6 +67,24 @@ Deployment scripts read environment-specific values from the environment or an u
 - SQL is always parameterised. Output is escaped (DOM text nodes only). CSP forbids external hosts and inline script.
 - Limits: message size, messages per second, connections per client, elements/bytes per document, images per document, request rates.
 
+## Use it with AI - no MCP needed
+The app version is shown next to the logo (`window.__draw.version`); quote it when reporting a bug. An AI can drive the board with plain text:
+
+1. Ask for mermaid code, paste it onto the board (it becomes a text element), select it and press **text2mermaid**. Real rectangles, diamonds, circles and routed arrows are created (parsed and laid out in the WASM engine; one undo step). Markdown fences, a BOM and trailing whitespace are tolerated. On a syntax error the line is named and the text is left untouched.
+
+```mermaid
+flowchart TD
+  A[Start] --> B{Valid?}
+  B -->|yes| C[Save]
+  B -->|no| D[Show error]
+```
+
+2. Ask for a single-file HTML page, paste it, select it and press **text2html**. It renders in an `<iframe sandbox>` with no `allow-scripts` and no `allow-same-origin`, so scripts never run (limit 64 KB).
+
+```html
+<!DOCTYPE html><html><body><h1>Hello</h1><p>Rendered, never executed.</p></body></html>
+```
+
 ## Size budget
 `engine_bg.wasm` must stay at or below 2 MiB (2,097,152 bytes); `scripts/build-web.sh` fails otherwise. Release profile: `opt-level="z"`, LTO, one codegen unit, `panic="abort"`, strip, then `wasm-opt -Oz`. The server is served gzip-compressed by the reverse proxy.
 

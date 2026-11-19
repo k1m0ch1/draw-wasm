@@ -302,8 +302,19 @@ pub fn route_key(els: &Els, a: &Element, geo: u64) -> u64 {
 
 fn dedup(mut v: Vec<f64>) -> Vec<f64> {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    v.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    v.dedup_by(|a, b| (*a - *b).abs() < 3.0);
     v
+}
+
+/// Make sure the exact stub coordinates are grid lines (a nearby line within the merge tolerance is replaced).
+fn pin(v: &mut Vec<f64>, exact: &[f64]) {
+    for &x in exact {
+        v.retain(|a| (*a - x).abs() >= 3.0 || *a == x);
+        if !v.contains(&x) {
+            v.push(x);
+        }
+    }
+    v.sort_by(|a, b| cmpf(*a, *b));
 }
 
 fn cmpf(a: f64, b: f64) -> std::cmp::Ordering {
@@ -343,8 +354,10 @@ fn search(els: &Els, s1: P, sd: D, e1: P, ed: D) -> Option<Vec<P>> {
     let (cx, cy) = (corridors(&xs), corridors(&ys));
     xs.extend(cx);
     ys.extend(cy);
-    let xs = dedup(xs);
-    let ys = dedup(ys);
+    let mut xs = dedup(xs);
+    let mut ys = dedup(ys);
+    pin(&mut xs, &[s1.0, e1.0]);
+    pin(&mut ys, &[s1.1, e1.1]);
     let (nx, ny) = (xs.len(), ys.len());
     if nx < 2 || ny < 2 {
         return None;

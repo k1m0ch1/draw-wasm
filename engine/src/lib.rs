@@ -1514,6 +1514,13 @@ impl Board {
             self.els.values().filter(|e| e.k == Kind::Html && !e.del).map(|e| (e.id.as_str(), e.x, e.y, e.w, e.h, e.v)).collect();
         serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
     }
+    /// The routed polyline of an arrow as [x0,y0,x1,y1,...] (empty when it is not an arrow). For tests and tooling.
+    pub fn arrow_route(&self, id: &str) -> Vec<f64> {
+        match self.els.get(id).filter(|e| e.k == Kind::Arrow && !e.del) {
+            Some(e) => self.route_of(e).iter().flat_map(|p| [p.0, p.1]).collect(),
+            None => vec![],
+        }
+    }
     pub fn html_src(&self, id: &str) -> String {
         self.els.get(id).filter(|e| e.k == Kind::Html && !e.del).map(|e| e.src.clone()).unwrap_or_default()
     }
