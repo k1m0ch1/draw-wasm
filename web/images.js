@@ -176,13 +176,14 @@ function toBlob(c, type, q) {
 const OK_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 export const MAX_EDGE = 2000;
 const MAX_BYTES = 3.9 * 1024 * 1024;
+const GIF_MAX_BYTES = 4 * 1024 * 1024 - 8192; // just under the server cap: GIFs are stored unchanged
 
 /** Downscale (max edge ~2000px) and re-encode to WebP/JPEG; shrinks further until it fits the server cap. */
 export async function prepareImage(file) {
   const bmp = await createImageBitmap(file);
   const w = bmp.width, h = bmp.height;
   const gif = file.type === 'image/gif' || (await isGifBlob(file));
-  if (gif && file.size <= MAX_BYTES) {
+  if (gif && file.size <= GIF_MAX_BYTES) {
     // keep the original bytes: re-encoding would drop the animation
     return { blob: file, bmp, w, h, hash: await sha256(file), animated: true };
   }

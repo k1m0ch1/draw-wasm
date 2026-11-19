@@ -199,6 +199,7 @@ function frame() {
     const er = b.take_edit_request();
     if (er) startEdit(er);
     if (b.take_render()) {
+      S.renders = (S.renders || 0) + 1;
       b.render(S.gfx, S.w, S.h, S.dpr);
       positionCursors();
       $('zlabel').textContent = Math.round(b.zoom() * 100) + '%';
