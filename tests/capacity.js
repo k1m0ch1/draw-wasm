@@ -40,11 +40,11 @@ const writeOp = (c, id) => c.ws.send(JSON.stringify({ t: 'ops', ops: [rect(id, c
   const owner = await join(nano, 'cown' + rnd(), tok); all.push(owner);
   ok(owner.role && owner.role.editor && owner.role.owner, 'owner joins as editor without a slot');
   const eds = [];
-  for (let i = 0; i < 15; i++) { const c = await join(nano, 'ced' + i + rnd()); eds.push(c); all.push(c); }
-  ok(eds.every((c) => c.role && c.role.editor && c.edit), '15 joiners all become editors');
+  for (let i = 0; i < 20; i++) { const c = await join(nano, 'ced' + i + rnd()); eds.push(c); all.push(c); }
+  ok(eds.every((c) => c.role && c.role.editor && c.edit), '20 joiners all become editors');
   ok(eds[19].role.cap === 20, 'role message carries the cap (20)');
   const v1 = await join(nano, 'cv1' + rnd()); all.push(v1);
-  ok(v1.role && !v1.role.editor && v1.role.queued && v1.role.pos === 1 && v1.edit === false, `16th joiner is a viewer, queue position ${v1.role && v1.role.pos}`);
+  ok(v1.role && !v1.role.editor && v1.role.queued && v1.role.pos === 1 && v1.edit === false, `21st joiner is a viewer, queue position ${v1.role && v1.role.pos}`);
   // viewer receives live ops but cannot write
   writeOp(eds[0], 'e-live1');
   ok(await waitFor(() => v1.msgs.some((m) => m.t === 'ops' && m.ops.some((o) => o.id === 'e-live1'))), 'viewer receives live ops from an editor');
