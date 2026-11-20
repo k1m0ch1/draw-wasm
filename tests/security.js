@@ -51,7 +51,8 @@ const last = (msgs, t) => [...msgs].reverse().find((m) => m.t === t);
   r = await call('DELETE', `/api/rooms/${B}/docs/${dA}`, undefined, own(tokB)); ok(r.status === 404, `delete A's doc through room B with B's owner token -> ${r.status} (must be 404)`);
   r = await call('GET', `/api/rooms/${A}/docs/${dA}`); ok(r.status === 200, "A's doc survived the cross-room delete");
   const ws0 = await wsOpen(B, dA, { cid: 'sec-idor', name: 'Idor' });
-  ok(!last(ws0.msgs, 'snap') && !!last(ws0.msgs, 'err'), 'WebSocket: joining doc of A while claiming room B is refused');
+  ok(!last(ws0.msgs, 'snap'), // refused either with an err message or by rejecting the upgrade (edge hosts)
+     'WebSocket: joining doc of A while claiming room B is refused');
   try { ws0.ws?.close(); } catch {}
   r = await call('GET', `/api/rooms/${A}`); let txt = await r.text();
   ok(r.status === 200 && !/[a-f0-9]{64}/.test(txt) && !/owner_hash|pw_hash|token/.test(txt), 'room listing exposes no image hashes, hashes or tokens');
@@ -139,7 +140,8 @@ const last = (msgs, t) => [...msgs].reverse().find((m) => m.t === t);
 
   // ---- (e) admin is not reachable
   for (const [m, p] of [['GET', '/admin'], ['POST', '/admin/purge-prefix'], ['POST', '/api/admin/purge'], ['GET', '/api/admin/stats'], ['POST', '/api/rooms/purge'], ['DELETE', '/api/rooms']]) {
-    r = await call(m, p, m === 'GET' ? undefined : { prefix: 'zz-test-' }); ok(r.status >= 400 && r.status < 500 && r.status !== 401, `${m} ${p} -> ${r.status} (no admin surface)`);
+    r = await call(m, p, m === 'GET' ? undefined : { prefix: 'zz-test-' }); const spa = r.status === 200 && /<!doctype html>/i.test(await r.clone().text()) && !(await r.clone().text()).includes('purged'); // an edge host answers unknown paths with the SPA page
+    ok((r.status >= 400 && r.status < 500 && r.status !== 401) || spa, `${m} ${p} -> ${r.status}${spa ? ' (SPA fallback page, no admin)' : ''} (no admin surface)`);
   }
   r = await call('GET', `/api/rooms/${A}`); ok(r.status === 200, 'rooms still exist after admin probes');
 

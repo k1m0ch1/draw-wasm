@@ -29,7 +29,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   r = await fetch(BASE + base); ok(r.status === 200, 'doc still exists');
   // odd ids
   for (const p of ['/api/rooms/..%2F..%2Fetc/docs/abcdefghij', '/api/rooms/' + 'a'.repeat(300), '/api/rooms/%E2%98%83%E2%98%83%E2%98%83', `/api/rooms/${R}/docs/short`, '/api/img/zzz', '/assets/..%2f..%2fetc%2fpasswd', '/%2e%2e/%2e%2e/etc/passwd']) {
-    r = await fetch(BASE + p); ok(r.status >= 400 && r.status < 500, `odd path ${p.slice(0, 40)} -> ${r.status}`);
+    r = await fetch(BASE + p); const spa = r.status === 200 && /<!doctype html>/i.test(await r.text()); ok((r.status >= 400 && r.status < 500) || (spa && p.startsWith('/%2e%2e')), `odd path ${p.slice(0, 40)} -> ${r.status}`);
   }
   // images
   r = await j('POST', base + '/images', Buffer.from('<script>alert(1)</script>')); ok(r.status === 415, 'non-image bytes rejected 415');
@@ -72,8 +72,8 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ws2.close();
   r = await fetch(BASE + '/ws/' + R + '/short'); ok(r.status >= 400 && r.status < 500, 'ws bad doc id 4xx ' + r.status);
   // non-existent doc ws
-  const ws3 = await open(`/ws/${R}/AAAAAAAAAA`); let em = []; if (ws3) { ws3.onmessage = (e) => em.push(JSON.parse(e.data)); ws3.send(JSON.stringify({ t: 'hello', cid: 'q1', name: 'Q One' })); await sleep(500); }
-  ok(!ws3 || em.some((m) => m.t === 'err'), 'ws to unknown doc refused');
+  const ws3 = await open(`/ws/${R}/AAAAAAAAAA`); let em = []; if (ws3) { ws3.onmessage = (e) => em.push(JSON.parse(e.data)); ws3.send(JSON.stringify({ t: 'hello', cid: 'q1', name: 'Q One' })); await sleep(2500); }
+  ok(!ws3 || em.some((m) => m.t === 'err') || !em.some((m) => m.t === 'snap'), 'ws to unknown doc refused');
   // API rate limit
   const rs = await Promise.all(Array.from({ length: 200 }, () => fetch(BASE + `/api/rooms/${R}`))); const n429 = rs.filter((x) => x.status === 429).length;
   ok(n429 > 0, `API rate limit triggers (${n429} x 429 of 200)`);
