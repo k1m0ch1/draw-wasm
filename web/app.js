@@ -135,18 +135,18 @@ function swatch(colour, onclick, label) {
 function buildStyle() {
   const p = $('style');
   const sec = (title, ...kids) => { const d = el('div', { class: 'sec' }, el('div', { class: 'sechead' }, title), el('div', { class: 'row' }, ...kids)); p.append(d); return d; };
-  sec('Stroke', ...STROKES.map((c) => swatch(c, () => S.board.set_style(c, '~', -1, -1, -1), 'Stroke ' + c)));
-  sec('Fill', ...FILLS.map((c) => swatch(c, () => S.board.set_style('', c, -1, -1, -1), 'Fill ' + c)));
+  sec('Stroke', ...STROKES.map((c) => swatch(c, () => { S.board.set_style(c, '~', -1, -1, -1); syncStyle(); }, 'Stroke ' + c)));
+  sec('Fill', ...FILLS.map((c) => swatch(c, () => { S.board.set_style('', c, -1, -1, -1); syncStyle(); }, 'Fill ' + c)));
   const wb = [1, 2, 4, 6].map((w) => {
     const b = el('button', { class: 'chip', title: 'Stroke width ' + w, 'data-sw': w });
     b.innerHTML = `<svg width="26" height="14"><line x1="3" y1="7" x2="23" y2="7" stroke="currentColor" stroke-width="${w}" stroke-linecap="round"/></svg>`;
-    b.addEventListener('click', () => S.board.set_style('', '~', w, -1, -1));
+    b.addEventListener('click', () => { S.board.set_style('', '~', w, -1, -1); syncStyle(); });
     return b;
   });
   sec('Width', ...wb);
   const heads = [['none', 0], ['end', 1], ['both', 3]].map(([n, v]) => {
     const b = el('button', { class: 'chip', title: 'Arrowheads: ' + n, 'data-ah': v }, n);
-    b.addEventListener('click', () => S.board.set_style('', '~', -1, v, -1));
+    b.addEventListener('click', () => { S.board.set_style('', '~', -1, v, -1); syncStyle(); });
     return b;
   });
   const reset = el('button', { class: 'chip wide', id: 'reset-route', title: 'Back to automatic routing (or double-click a route handle)' }, 'reset route');
@@ -154,7 +154,7 @@ function buildStyle() {
   sec('Arrow', ...heads, reset);
   const sizes = [['S', 14], ['M', 18], ['L', 26], ['XL', 38]].map(([n, v]) => {
     const b = el('button', { class: 'chip', title: 'Text size ' + v, 'data-fs': v }, n);
-    b.addEventListener('click', () => S.board.set_style('', '~', -1, -1, v));
+    b.addEventListener('click', () => { S.board.set_style('', '~', -1, -1, v); syncStyle(); });
     return b;
   });
   sec('Text', ...sizes);
