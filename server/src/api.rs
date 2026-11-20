@@ -708,3 +708,67 @@ pub async fn admin_overview(
     }
     axum::Json(crate::admin::overview(&app).await).into_response()
 }
+
+fn admin_ok(app: &crate::state::App, headers: &axum::http::HeaderMap) -> bool {
+    use crate::limits::ct_eq;
+    !app.cfg.admin_key.is_empty()
+        && headers
+            .get("x-admin-key")
+            .and_then(|v| v.to_str().ok())
+            .map_or(false, |k| ct_eq(k, &app.cfg.admin_key))
+}
+
+macro_rules! admin_route {
+    ($name:ident, $body:expr) => {
+        pub async fn $name(
+            axum::extract::State(app): axum::extract::State<std::sync::Arc<crate::state::App>>,
+            headers: axum::http::HeaderMap,
+        ) -> axum::response::Response {
+            if !admin_ok(&app, &headers) {
+                return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+            }
+            let f: std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>> = Box::pin($body(&app));
+            axum::Json(f.await).into_response()
+        }
+    };
+}
+
+admin_route!(admin_rooms, |app| crate::admin::rooms_list(app));
+
+
+
+pub async fn admin_docs(
+    axum::extract::State(app): axum::extract::State<std::sync::Arc<crate::state::App>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    if !admin_ok(&app, &headers) { return (axum::http::StatusCode::NOT_FOUND, "not found").into_response(); }
+    let (mut limit, mut offset) = (24i64, 0i64);
+    if let Some(qs) = &q {
+        for pair in qs.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or(("", ""));
+            let val: i64 = v.parse().unwrap_or(0);
+            if k == "limit" { limit = val.clamp(1, 100); }
+            if k == "offset" { offset = val.clamp(0, 1_000_000); }
+        }
+    }
+    axum::Json(crate::admin::docs_list(&app, limit, offset).await).into_response()
+}
+
+pub async fn admin_images(
+    axum::extract::State(app): axum::extract::State<std::sync::Arc<crate::state::App>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> axum::response::Response {
+    if !admin_ok(&app, &headers) { return (axum::http::StatusCode::NOT_FOUND, "not found").into_response(); }
+    let (mut limit, mut offset) = (24i64, 0i64);
+    if let Some(qs) = &q {
+        for pair in qs.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or(("", ""));
+            let val: i64 = v.parse().unwrap_or(0);
+            if k == "limit" { limit = val.clamp(1, 100); }
+            if k == "offset" { offset = val.clamp(0, 1_000_000); }
+        }
+    }
+    axum::Json(crate::admin::images_list(&app, limit, offset).await).into_response()
+}

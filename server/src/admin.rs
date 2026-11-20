@@ -125,6 +125,77 @@ pub async fn overview(app: &App) -> Value {
     })
 }
 
+
+/// Rooms in the database: name, age, password flag, doc count, latest doc update.
+pub async fn rooms_list(app: &App) -> Value {
+    let rooms = app
+        .db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT r.id, r.created, r.pw_hash IS NOT NULL, count(d.nano), coalesce(max(d.updated), r.created) FROM rooms r LEFT JOIN docs d ON d.room = r.id GROUP BY r.id ORDER BY 5 DESC LIMIT 500")
+                .expect("rooms q");
+            let rows = st
+                .query_map([], |r| {
+                    Ok(json!({ "room": r.get::<_, String>(0)?, "created": r.get::<_, i64>(1)?, "pw": r.get::<_, i64>(2)? != 0, "docs": r.get::<_, i64>(3)?, "last": r.get::<_, i64>(4)? }))
+                })
+                .expect("rooms map")
+                .filter_map(|x| x.ok())
+                .collect::<Vec<_>>();
+            rows
+        })
+        .await
+        .unwrap_or_default();
+    json!({ "rooms": rooms })
+}
+
+/// Documents in the database, newest first, with a live element count from the snapshot.
+pub async fn docs_list(app: &App, limit: i64, offset: i64) -> Value {
+    let (total, docs) = app
+        .db
+        .call(move |c| {
+            let total: i64 = c.query_row("SELECT count(*) FROM docs", [], |r| r.get(0)).unwrap_or(0);
+            let mut st = c
+                .prepare("SELECT nano, room, title, updated, created, snap FROM docs ORDER BY updated DESC LIMIT ?1 OFFSET ?2")
+                .expect("docs q");
+            let rows = st
+                .query_map([limit, offset], |r| {
+                    let snap: String = r.get(5)?;
+                    let elements = serde_json::from_str::<Vec<Value>>(&snap).map(|v| v.len()).unwrap_or(0);
+                    Ok(json!({ "nano": r.get::<_, String>(0)?, "room": r.get::<_, String>(1)?, "title": r.get::<_, String>(2)?, "updated": r.get::<_, i64>(3)?, "created": r.get::<_, i64>(4)?, "elements": elements }))
+                })
+                .expect("docs map")
+                .filter_map(|x| x.ok())
+                .collect::<Vec<_>>();
+            (total, rows)
+        })
+        .await
+        .unwrap_or((0, vec![]));
+    json!({ "total": total, "docs": docs })
+}
+
+/// Images in the database (metadata only; the bytes are fetched per-thumb from the public image route).
+pub async fn images_list(app: &App, limit: i64, offset: i64) -> Value {
+    let (total, images) = app
+        .db
+        .call(move |c| {
+            let total: i64 = c.query_row("SELECT count(*) FROM images", [], |r| r.get(0)).unwrap_or(0);
+            let mut st = c
+                .prepare("SELECT i.sha, i.mime, i.size, i.created, (SELECT count(*) FROM doc_images di WHERE di.sha = i.sha) FROM images i ORDER BY i.created DESC LIMIT ?1 OFFSET ?2")
+                .expect("images q");
+            let rows = st
+                .query_map([limit, offset], |r| {
+                    Ok(json!({ "sha": r.get::<_, String>(0)?, "mime": r.get::<_, String>(1)?, "size": r.get::<_, i64>(2)?, "created": r.get::<_, i64>(3)?, "used_by": r.get::<_, i64>(4)? }))
+                })
+                .expect("images map")
+                .filter_map(|x| x.ok())
+                .collect::<Vec<_>>();
+            (total, rows)
+        })
+        .await
+        .unwrap_or((0, vec![]));
+    json!({ "total": total, "images": images })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
