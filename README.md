@@ -10,9 +10,9 @@
 **A Whimsical-style whiteboard that runs on a 137 KB Rust engine.**
 Local-first, live-collaborative, one small server binary, one SQLite file.
 
-<img src="docs/hero.gif" width="880" alt="pasting mermaid code, one click, a routed flowchart appears" title="paste mermaid, click text2mermaid, drag nodes">
+<img src="docs/hero.gif" width="880" alt="a pasted animated GIF of a chirping cat next to mermaid code that converts into a routed flowchart beside the text" title="paste a GIF, paste mermaid, one click, drag the elbows">
 
-*paste mermaid code -> `text2mermaid` -> drag nodes -- every frame above is the real app, not a mockup*
+*paste an animated GIF (the cat survives), paste mermaid code, click `text2mermaid` -- the flow appears next to the text, and the arrow elbows drag like Whimsical. Every frame above is the real app, not a mockup. Cat by @faaannnyyy4.*
 
 </div>
 
