@@ -1,3 +1,4 @@
+mod admin;
 mod api;
 mod db;
 mod limits;
@@ -114,6 +115,7 @@ async fn main() {
         next_conn: Default::default(),
         room_gen: Default::default(),
         pw_sem: tokio::sync::Semaphore::new(2),
+        recent: Default::default(),
         build: statics::build_id(&statics),
         statics,
     });
@@ -121,6 +123,7 @@ async fn main() {
 
     let router = Router::new()
         .route("/healthz", get(api::healthz))
+        .route("/admin/api/overview", get(api::admin_overview))
         .route("/api/rooms", post(api::claim_room))
         .route("/api/rooms/{room}", get(api::get_room).delete(api::delete_room))
         .route("/api/rooms/{room}/password", put(api::set_password))

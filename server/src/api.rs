@@ -689,3 +689,22 @@ pub async fn unlock(
         .await;
     ok(json!({ "grant": token, "pw": true }))
 }
+
+
+/// Read-only admin overview. Enabled only when DRAW_ADMIN_KEY is set and the proxy
+/// presents it in x-admin-key (constant-time compare). Otherwise: plain 404.
+pub async fn admin_overview(
+    axum::extract::State(app): axum::extract::State<std::sync::Arc<crate::state::App>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use crate::limits::ct_eq;
+    let ok = !app.cfg.admin_key.is_empty()
+        && headers
+            .get("x-admin-key")
+            .and_then(|v| v.to_str().ok())
+            .map_or(false, |k| ct_eq(k, &app.cfg.admin_key));
+    if !ok {
+        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    axum::Json(crate::admin::overview(&app).await).into_response()
+}

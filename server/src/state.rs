@@ -4,7 +4,7 @@ use crate::db::{self, Db};
 use crate::limits::Limiter;
 use proto::{Doc, Element, Peer, ServerMsg};
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -27,6 +27,8 @@ pub struct Config {
     pub max_conns_per_ip: usize,
     pub max_docs_per_room: i64,
     pub max_rooms: i64,
+    /// admin API gate; empty (default) disables the admin routes entirely
+    pub admin_key: String,
 }
 
 fn env_num<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -52,6 +54,7 @@ impl Config {
             max_conns_per_ip: env_num("DRAW_MAX_CONNS_PER_IP", 30),
             max_docs_per_room: env_num("DRAW_MAX_DOCS_PER_ROOM", 100),
             max_rooms: env_num("DRAW_MAX_ROOMS", 5000),
+            admin_key: std::env::var("DRAW_ADMIN_KEY").ok().filter(|s| !s.is_empty()).unwrap_or_default(),
         }
     }
 }
@@ -103,6 +106,8 @@ pub struct Inner {
     pub total: usize,
     pub clients: HashMap<u64, Client>,
     pub deleted: bool,
+    /// when ops were last applied (admin display; distinct from last_edit which is any change)
+    pub last_op: Instant,
     /// editors that disconnected recently: (cid, when)
     pub tickets: Vec<(String, Instant)>,
     pub order_ctr: u64,
@@ -125,6 +130,8 @@ pub struct App {
     pub room_gen: Mutex<HashMap<String, u64>>,
     /// bounds concurrent password hashing (argon2 is memory hungry on purpose)
     pub pw_sem: tokio::sync::Semaphore,
+    /// recent drawing activity for the admin overview (bounded)
+    pub recent: Mutex<VecDeque<crate::admin::RecentEvent>>,
     pub statics: crate::statics::Statics,
     /// asset version of the deployed web bundle (the client reports its own in the hello)
     pub build: String,
@@ -349,6 +356,7 @@ impl App {
                         dirty: false,
                         last_edit: now,
                         first_dirty: now,
+                        last_op: now,
                         sizes,
                         total,
                         clients: HashMap::new(),
@@ -555,4 +563,25 @@ pub fn nanoid() -> String {
     (0..proto::NANO_LEN)
         .map(|_| proto::NANO_ALPHABET[r.gen_range(0..64)] as char)
         .collect()
+}
+
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    pub fn app_for_tests() -> App {
+        App {
+            cfg: Config { addr: "127.0.0.1:0".into(), db_path: ":memory:".into(), static_dir: "".into(), public_base_url: None, max_image_bytes: 1, max_gif_bytes: 1, max_editors: 20, editor_idle_secs: 600, max_doc_image_bytes: 1, max_doc_images: 1, max_elements: 10, max_doc_bytes: 4096, max_ws_msg: 1024, max_conns_per_ip: 5, max_docs_per_room: 10, max_rooms: 10, admin_key: String::new() },
+            db: Db::open(std::path::Path::new(":memory:")).expect("mem db"),
+            limiter: Default::default(),
+            salt: rand::thread_rng().gen(),
+            docs: Default::default(),
+            next_conn: Default::default(),
+            room_gen: Default::default(),
+            pw_sem: tokio::sync::Semaphore::new(2),
+            build: String::new(),
+            statics: crate::statics::Statics::default(),
+            recent: Mutex::new(VecDeque::new()),
+        }
+    }
 }

@@ -15,7 +15,7 @@ use proto::{ClientMsg, Element, Peer, ServerMsg};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const MAX_OPS_PER_MSG: usize = 500;
@@ -213,6 +213,10 @@ async fn handle(app: Arc<App>, mut sock: WebSocket, room: String, nano: String, 
 }
 
 fn apply_ops(app: &App, active: &Active, conn: u64, tx: &mpsc::Sender<Arc<String>>, ops: Vec<Element>) {
+    let who = {
+        let g = lock(&active.inner);
+        g.clients.get(&conn).map(|c| if c.peer.name.is_empty() { "(anon)".to_string() } else { c.peer.name.clone() }).unwrap_or_default()
+    };
     let mut accepted: Vec<Element> = vec![];
     let mut correct: Vec<Element> = vec![];
     let mut reject: Option<&str> = None;
@@ -249,7 +253,10 @@ fn apply_ops(app: &App, active: &Active, conn: u64, tx: &mpsc::Sender<Arc<String
     }
     if !accepted.is_empty() {
         g.seq += 1;
+        g.last_op = Instant::now();
         g.mark_dirty();
+        let names: Vec<String> = accepted.iter().map(|e| crate::admin::describe(e)).collect();
+        app.record_recent(&active.room, &active.nano, &who, &names.join(", "));
         let m = encode(&ServerMsg::Ops { seq: g.seq, ops: accepted });
         g.broadcast(&m, Some(conn));
     }
