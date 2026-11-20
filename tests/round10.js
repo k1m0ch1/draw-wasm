@@ -55,8 +55,8 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
   const a1 = await live(O);
   const ho = a1.find((e) => e.k === 'html');
   ok(!!ho && ho.src.includes('Hello from HTML'), '54: text2html creates an html element that holds the source (full document accepted)');
-  ok(!a1.some((e) => e.id === tid), '54: the source text element is replaced');
-  ok(a1.length === nBefore, '54: one element replaced by one');
+  ok(a1.some((e) => e.id === tid && e.k === 'text'), '65: the source text element stays');
+  ok(a1.length === nBefore + 1, '65: exactly one new element is added');
   const fr = await O.evaluate(() => { const f = document.querySelector('#htmllayer iframe'); return f ? { sb: f.getAttribute('sandbox'), has: f.hasAttribute('sandbox') } : null; });
   ok(fr && fr.has && fr.sb === '', `54: the iframe has an EMPTY sandbox attribute (no allow-scripts, no allow-same-origin) (${JSON.stringify(fr)})`);
   ok((await O.evaluate(() => window.__pwned)) === undefined && (await O.title()) !== 'pwned', '54: embedded JavaScript did not run and could not reach the parent');
@@ -96,7 +96,7 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
   await O.evaluate(() => window.__draw.board.undo()); await sleep(150);
   await O.evaluate(() => window.__draw.board.undo()); await sleep(300);
   const a2 = await live(O);
-  ok(a2.some((e) => e.id === tid && e.k === 'text') && !a2.some((e) => e.k === 'html'), '54: undo restores the text and removes the html object');
+  ok(a2.some((e) => e.id === tid && e.k === 'text') && !a2.some((e) => e.k === 'html'), '54/65: undo removes only the html object, the text stays');
   ok((await O.$$('#htmllayer iframe')).length === 0, '54: the frame is gone after undo');
   await O.evaluate(() => { window.__draw.board.redo(); window.__draw.board.redo(); }); await sleep(300);
   ok((await live(O)).some((e) => e.k === 'html'), '54: redo brings it back');
@@ -110,12 +110,12 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
   await addText(O, '\ufeff```html\n<p>fenced</p>\n```\n   ');
   await click(O, 'text2html'); await sleep(300);
   ok((await live(O)).some((e) => e.k === 'html' && e.src === '<p>fenced</p>'), '56: a fenced block with BOM and trailing whitespace is accepted and unwrapped');
-  const big = '<p>' + 'x'.repeat(70000) + '</p>';
+  const big = '<p>' + 'x'.repeat(410000) + '</p>';
   const bid = await addText(O, big);
   const nHtml = (await live(O)).filter((e) => e.k === 'html').length;
   await click(O, 'text2html');
   const tt = await toastText(O);
-  ok(/too large/i.test(tt) && /64 KB/.test(tt), `54: >64 KB is refused with a clear toast (${tt.slice(0, 80)})`);
+  ok(/too large/i.test(tt) && /400 KB/.test(tt), `62: >400 KB is refused with a clear toast (${tt.slice(0, 80)})`);
   ok((await live(O)).filter((e) => e.k === 'html').length === nHtml && (await live(O)).some((e) => e.id === bid && e.k === 'text'), '54/56: on refusal the source text is intact');
   ok(/draw v\d+\.\d+\.\d+/.test(tt), '56: the error toast quotes the build version');
   const wsOps = (page, ops) => page.evaluate(([u, ops]) => new Promise((res) => {
@@ -125,8 +125,8 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
     setTimeout(() => { ws.close(); res(got); }, 1800);
   }), [BASE.replace(/^http/, 'ws') + '/ws' + new URL(url).pathname, ops]);
   const mk = (o) => ({ id: 'zz' + L.rnd(), v: 1, by: 'rawclient', k: 'html', x: 0, y: 0, w: 100, h: 100, z: 1, ...o });
-  const r1 = await wsOps(O, [mk({ src: 'x'.repeat(65537) })]);
-  ok(r1.some((m) => /err:.*html too large/.test(m)), `54: the server refuses an html source over 64 KB (${r1.join(',')})`);
+  const r1 = await wsOps(O, [mk({ src: 'x'.repeat(409601) })]);
+  ok(r1.some((m) => /err:.*html too large/.test(m)), `62: the server refuses an html source over 400 KB (${r1.join(',')})`);
   const r2 = await wsOps(O, [mk({ k: 'rect', src: '<b>x</b>' })]);
   ok(r2.some((m) => /err:.*html payload/.test(m)), `54: the server refuses an html payload on a non-html element (${r2.join(',')})`);
   const r3 = await wsOps(O, [mk({ src: '' })]);
@@ -145,7 +145,7 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
   const nodes = rects(all).filter(fresh);
   const arrows = all.filter((e) => e.k === 'arrow' && fresh(e));
   const labels = all.filter((e) => e.k === 'text' && fresh(e));
-  ok(!all.some((e) => e.id === mid), '55: the mermaid text element is replaced by the flow');
+  ok(all.some((e) => e.id === mid && e.k === 'text'), '65: the mermaid text element stays');
   const kinds = (k) => nodes.filter((e) => e.k === k).length;
   ok(nodes.length === 7 && kinds('diamond') === 1 && kinds('ellipse') === 1 && kinds('rect') === 5, `55: 7 nodes with the right shapes (rect ${kinds('rect')}, diamond ${kinds('diamond')}, circle ${kinds('ellipse')})`);
   ok(arrows.length === 10, `55: 10 edges became arrows (${arrows.length})`);
@@ -170,7 +170,7 @@ const FLOW = '```mermaid\nflowchart TD\n  A[Start] --> B{Valid input?}\n  B -->|
   ok(arrows.filter((a) => (a.ah & 1) === 1).length === 10 && arrows.filter((a) => (a.ah & 16) === 16).length === 1, '55: every edge has a head, -.-> is dashed');
   await O.evaluate(() => window.__draw.board.undo()); await sleep(300);
   const u = await live(O);
-  ok(u.some((e) => e.id === mid && e.k === 'text') && !u.some((e) => arrows.some((a) => a.id === e.id) || nodes.some((n) => n.id === e.id) || labels.some((t) => t.id === e.id)), '55: ONE undo removes everything created and restores the text');
+  ok(u.some((e) => e.id === mid && e.k === 'text') && !u.some((e) => arrows.some((a) => a.id === e.id) || nodes.some((n) => n.id === e.id) || labels.some((t) => t.id === e.id)), '55/65: ONE undo removes everything created, the text stays');
   await O.evaluate(() => window.__draw.board.redo()); await sleep(300);
   ok((await live(O)).filter((e) => e.k === 'arrow').length >= 10, '55: redo recreates the flow');
   for (const [src, chk, name] of [
