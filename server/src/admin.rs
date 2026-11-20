@@ -45,16 +45,15 @@ pub fn describe(e: &proto::Element) -> String {
         .collect::<String>()
         .trim()
         .to_string();
-    let kind = match e.k.as_str() {
-        "rect" => "rect",
-        "ellipse" => "circle",
-        "diamond" => "diamond",
-        "arrow" => "arrow",
-        "pencil" => "pencil",
-        "text" => "text",
-        "image" => "image",
-        "html" => "html object",
-        other => other,
+    let kind = match e.k {
+        proto::Kind::Rect => "rect",
+        proto::Kind::Ellipse => "circle",
+        proto::Kind::Diamond => "diamond",
+        proto::Kind::Arrow => "arrow",
+        proto::Kind::Pencil => "pencil",
+        proto::Kind::Text => "text",
+        proto::Kind::Image => "image",
+        proto::Kind::Html => "html object",
     };
     let base = if snippet.is_empty() { kind.to_string() } else { format!("{kind} \"{snippet}\"") };
     if e.del { format!("deleted {base}") } else { base }
@@ -133,14 +132,14 @@ mod tests {
     #[test]
     fn describe_names_kinds_and_snippets() {
         let mut e = proto::Element::default();
-        e.k = "rect".into();
+        e.k = proto::Kind::Rect;
         e.tx = "kumpulin fakta".into();
         assert_eq!(describe(&e), "rect \"kumpulin fakta\"");
         e.del = true;
         assert_eq!(describe(&e), "deleted rect \"kumpulin fakta\"");
         e.tx = String::new();
         e.del = false;
-        e.k = "html".into();
+        e.k = proto::Kind::Html;
         assert_eq!(describe(&e), "html object");
     }
 
