@@ -187,6 +187,7 @@
       </svg>
       <figcaption>Fig. 1 — Three tiers: the browser is the application; the server is coordination and storage.</figcaption>
     </figure>
+    <p class="ssub"><strong>Data path.</strong> <em>Offline / private</em> documents are written entirely in the browser (IndexedDB, no server involved). <em>Online / cloud</em> documents use the server: SQLite for storage and a WebSocket for live collaboration. The live instance is <strong>https://coret.app</strong>.</p>
   </section>
 
   <!-- ================= 2 · BACKEND ================= -->
@@ -401,18 +402,18 @@
     <table>
       <thead><tr><th>Guardrail</th><th>Limit</th><th>What happens at the edge</th></tr></thead>
       <tbody>
-        <tr><td>Editors per document</td><td>15 concurrent (+ the owner)</td><td class="note">everyone else joins as a live viewer in a FIFO queue — auto-promoted the moment a slot frees</td></tr>
+        <tr><td>Editors per document</td><td>20 concurrent (+ the owner)</td><td class="note">everyone else joins as a live viewer in a FIFO queue — auto-promoted the moment a slot frees</td></tr>
         <tr><td>Images</td><td>≤ 2,000 px edge · 2 MB max</td><td class="note">shrunk in the browser before upload; the server refuses anything larger</td></tr>
         <tr><td>Animated GIFs</td><td>≤ 3 MB, original bytes</td><td class="note">kept byte-identical so they stay animated; larger is refused with a clear message</td></tr>
         <tr><td>Client memory budget</td><td>&lt; 100 MB typical</td><td class="note">decoded images live in an LRU cache with a pixel budget; GIF frames capped</td></tr>
         <tr><td>Elements / document</td><td>5,000</td><td class="note">further edits are refused — the doc stays responsive</td></tr>
         <tr><td>Document size</td><td>4 MB serialized</td><td class="note">bounds snapshots and reload cost</td></tr>
-        <tr><td>Connections</td><td>20 per IP</td><td class="note">blunt but effective against one-machine floods</td></tr>
+        <tr><td>Connections</td><td>30 per IP</td><td class="note">blunt but effective against one-machine floods</td></tr>
       </tbody>
     </table>
 
     <div class="grid c3" style="margin-top:14px">
-      <div class="mini"><h3><span class="dot"></span>The 15-editor room</h3><p>A room can hold many viewers, but only 15 editors at once — so the expensive N×N path stays bounded. Viewers still see every stroke live; the queue promotes in join order, no refresh needed.</p></div>
+      <div class="mini"><h3><span class="dot"></span>The 20-editor room</h3><p>A room can hold many viewers, but only 20 editors at once — so the expensive N×N path stays bounded. Viewers still see every stroke live; the queue promotes in join order, no refresh needed.</p></div>
       <div class="mini"><h3><span class="dot"></span>The memory diet</h3><p>Decoded bitmaps sit in an LRU cache under a pixel budget (re-decoded on demand from local storage), GIF frame caches are capped, and the WASM engine trims its allocations — targeting under 100 MB typical.</p></div>
       <div class="mini"><h3><span class="dot hollow"></span>Residual risks we watch</h3><p>Image hot-linking (cache at the CDN solves it), cursor fan-out to very many viewers, and the reload wave right after a deploy (already jittered). None are unbounded today.</p></div>
     </div>
@@ -443,7 +444,7 @@
         <tr><td>Share URL</td><td>/room-id/nano-id-10</td><td class="note">room names claimable; document ids unguessable</td></tr>
         <tr><td>Images</td><td>≤ 2,000 px edge · 2 MB max</td><td class="note">shrunk client-side before upload; server-enforced</td></tr>
         <tr><td>Animated GIFs</td><td>≤ 3 MB · original bytes</td><td class="note">larger is refused with a clear message</td></tr>
-        <tr><td>Editors per room</td><td>15 concurrent (+ owner)</td><td class="note">others watch live in a FIFO queue, auto-promoted</td></tr>
+        <tr><td>Editors per room</td><td>20 concurrent (+ owner)</td><td class="note">others watch live in a FIFO queue, auto-promoted</td></tr>
         <tr><td>Client memory</td><td>&lt; 100 MB typical</td><td class="note">LRU image cache · capped GIF frames</td></tr>
         <tr><td>Rate limit</td><td>20 req/s per IP, burst 40</td><td class="note">429s enforced at the edge</td></tr>
         <tr><td>Reconnect</td><td>exponential backoff → ~30 s</td><td class="note">zero edits lost while offline</td></tr>

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.10.0-147a6b?style=flat-square)](web/version.js)
+[![version](https://img.shields.io/badge/version-0.11.0-147a6b?style=flat-square)](web/version.js)
 [![engine](https://img.shields.io/badge/engine-306%20KB%20wasm%20%C2%B7%20137%20KB%20gzip-3b7ea1?style=flat-square)](#size-budget)
 [![accounts](https://img.shields.io/badge/0%20accounts%20%C2%B7%200%20telemetry-8a6fbf?style=flat-square)](#security-model)
 [![license](https://img.shields.io/badge/license-MIT-555?style=flat-square)](LICENSE)
@@ -21,12 +21,12 @@ Local-first, live-collaborative, one small server binary, one SQLite file.
 ## Features
 
 - **Tools** -- select, rectangle, ellipse, diamond, arrow (binds to shapes and follows them), smoothed pencil, text (free-standing or inside shapes via double-click), images (paste or drop).
-- **Whimsical-style arrow routing** -- orthogonal segments, rounded corners, anchors on the facing side, and arrows that dodge the nodes in between. Complex graphs stay tidy.
-- **`text2mermaid`** -- paste mermaid code, select it, one click: real rectangles, diamonds, circles and routed arrows, parsed and laid out by the WASM engine itself (no JS mermaid library). One undo step removes the whole flow.
+- **Whimsical-style arrow routing** -- orthogonal segments, rounded corners, anchors on the facing side, and arrows that dodge the nodes in between. Complex graphs stay tidy. Select an arrow and drag a segment handle to adjust the elbow (the route is stored on the element and syncs); double-click a handle or press `reset route` to go back to automatic routing.
+- **`text2mermaid`** -- paste mermaid code, select it, one click: real rectangles, diamonds, circles, stadiums, labelled subgraph containers and routed arrows, parsed and laid out by the WASM engine itself (no JS mermaid library). The flow is created to the right of the text, which stays editable; one undo step removes only the new objects.
 - **`text2html`** -- paste single-file HTML, select it, one click: it renders as an object in a sandboxed `<iframe>` where **JavaScript never runs**.
 - **Local by default** -- documents live in IndexedDB on your device, private, no share link. Autosave after 60 s idle, explicit Save, save on tab hide.
 - **Store on cloud** -- one deliberate click. Cloud documents are public: you pick a room ID (first come, first served), the share URL is `<roomID>/<NanoID>`.
-- **Live collaboration** -- anyone with the URL edits together: presence cursors, required display names, owner marked. Last-writer-wins per element, server sequence numbers, snapshot on join and reconnect. At most 15 concurrent editors per document; everyone else watches live in a FIFO queue and is promoted the moment a slot frees.
+- **Live collaboration** -- anyone with the URL edits together: presence cursors, required display names, owner marked. Last-writer-wins per element, server sequence numbers, snapshot on join and reconnect. At most 20 concurrent editors per document; everyone else watches live in a FIFO queue and is promoted the moment a slot frees.
 - **Multi-select, move, resize, delete, duplicate, undo/redo, z-order, colour/stroke presets, arrowheads.** Zoom 10%..400%, pan, zoom to fit. Touch friendly. Names are optional for viewing: joiners without a name get a random face emoji. Animated GIFs keep their animation (original bytes, <= 3 MiB).
 - The app version sits in the topbar next to the logo; error toasts quote it.
 
@@ -40,6 +40,13 @@ Local-first, live-collaborative, one small server binary, one SQLite file.
 | `engine/` | WASM engine -- scene, hit-testing, arrow binding & routing, mermaid parsing & layout, undo/redo, Canvas2D rendering |
 | `server/` | axum + rusqlite (bundled) + tokio; static files, REST API, WebSocket |
 | `web/` | plain JS/HTML/CSS shell, no framework, no external requests at runtime |
+
+## Where your data lives
+
+- **Offline / private documents** are written entirely in the browser (IndexedDB). No server is involved: no upload, no account, no network write.
+- **Online / cloud documents** use the server: SQLite for storage and a WebSocket for live collaboration.
+
+The live instance runs at https://coret.app (share links look like `https://coret.app/<roomID>/<NanoID>`).
 
 Architecture brief (HTML and Markdown): [`ARCH.html`](ARCH.html) / [`ARCH.md`](ARCH.md).
 
@@ -73,14 +80,14 @@ Admin tasks run locally inside the container (there is no network admin endpoint
 | `PUBLIC_BASE_URL` | (from request) | base URL used in share links, e.g. `https://example.com` |
 | `DRAW_MAX_IMAGE_BYTES` | 2 MiB | per image (not GIF); the client re-encodes to fit |
 | `DRAW_MAX_GIF_BYTES` | 3 MiB | per animated GIF, stored byte for byte; larger is refused |
-| `DRAW_MAX_EDITORS` | 15 | concurrent editors per document (the owner does not count); the rest view in a FIFO queue |
+| `DRAW_MAX_EDITORS` | 20 | concurrent editors per document (the owner does not count); the rest view in a FIFO queue |
 | `DRAW_EDITOR_IDLE_SECS` | 600 | an editor idle this long yields the slot when somebody is waiting |
 | `DRAW_MAX_DOC_IMAGE_BYTES` | 24 MiB | images per document |
 | `DRAW_MAX_DOC_IMAGES` | 40 | images per document |
 | `DRAW_MAX_ELEMENTS` | 5000 | elements per document |
 | `DRAW_MAX_DOC_BYTES` | 4 MiB | serialized document |
-| `DRAW_MAX_WS_MSG` | 1 MiB | WebSocket frame |
-| `DRAW_MAX_CONNS_PER_IP` | 20 | concurrent sockets per client |
+| `DRAW_MAX_WS_MSG` | 2 MiB | WebSocket frame (fits a 400 KB HTML object) |
+| `DRAW_MAX_CONNS_PER_IP` | 30 | concurrent sockets per client (raised from 20 so the 20-editor cap can be tested from one IP) |
 | `DRAW_MAX_DOCS_PER_ROOM` | 100 | documents per room |
 | `DRAW_MAX_ROOMS` | 5000 | rooms |
 
@@ -101,7 +108,7 @@ Deployment scripts read environment-specific values from the environment or an u
 
 The app version is shown next to the logo (`window.__draw.version`); quote it when reporting a bug. An AI can drive the board with plain text:
 
-1. Ask for mermaid code, paste it onto the board (it becomes a text element), select it and press **text2mermaid**. Real rectangles, diamonds, circles and routed arrows are created (parsed and laid out in the WASM engine; one undo step). Markdown fences, a BOM and trailing whitespace are tolerated. On a syntax error the line is named and the text is left untouched.
+1. Ask for mermaid code, paste it onto the board (it becomes a text element), select it and press **text2mermaid**. Real rectangles, diamonds, circles and routed arrows are created (parsed and laid out in the WASM engine; one undo step). Markdown fences, a BOM and trailing whitespace are tolerated. Subgraphs (`subgraph id [Label]` ... `end`, nested, with their own `direction`) become labelled containers; edges to a subgraph id connect the containers. The text element is never replaced: the flow appears to its right (convert again after editing the text for another copy). On a syntax error the line is named and nothing is created.
 
 ```mermaid
 flowchart TD
@@ -110,7 +117,7 @@ flowchart TD
   B -->|no| D[Show error]
 ```
 
-2. Ask for a single-file HTML page, paste it, select it and press **text2html**. It renders in an `<iframe sandbox>` with no `allow-scripts` and no `allow-same-origin`, so scripts never run (limit 64 KB).
+2. Ask for a single-file HTML page, paste it, select it and press **text2html**. It renders in an `<iframe sandbox>` with no `allow-scripts` and no `allow-same-origin`, so scripts never run (limit 400 KB). The text stays where it is and the rendered object appears to its right.
 
 ```html
 <!DOCTYPE html><html><body><h1>Hello</h1><p>Rendered, never executed.</p></body></html>

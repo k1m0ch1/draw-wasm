@@ -36,13 +36,13 @@ const writeOp = (c, id) => c.ws.send(JSON.stringify({ t: 'ops', ops: [rect(id, c
   r = await api('POST', `/api/rooms/${ROOM}/docs`, { title: 'cap', els: [] }, { 'x-owner-token': tok }); const nano = (await r.json()).nano;
   const all = [];
 
-  // ---- 49: owner + 15 editors + a viewer
+  // ---- 49: owner + 20 editors + a viewer
   const owner = await join(nano, 'cown' + rnd(), tok); all.push(owner);
   ok(owner.role && owner.role.editor && owner.role.owner, 'owner joins as editor without a slot');
   const eds = [];
   for (let i = 0; i < 15; i++) { const c = await join(nano, 'ced' + i + rnd()); eds.push(c); all.push(c); }
   ok(eds.every((c) => c.role && c.role.editor && c.edit), '15 joiners all become editors');
-  ok(eds[14].role.cap === 15, 'role message carries the cap (15)');
+  ok(eds[19].role.cap === 20, 'role message carries the cap (20)');
   const v1 = await join(nano, 'cv1' + rnd()); all.push(v1);
   ok(v1.role && !v1.role.editor && v1.role.queued && v1.role.pos === 1 && v1.edit === false, `16th joiner is a viewer, queue position ${v1.role && v1.role.pos}`);
   // viewer receives live ops but cannot write
@@ -64,7 +64,7 @@ const writeOp = (c, id) => c.ws.send(JSON.stringify({ t: 'ops', ops: [rect(id, c
   ok((Date.now() - t0) < 10000, 'promotion happened within a few seconds');
   writeOp(v1, 'v-legal');
   ok(await waitFor(() => owner.msgs.some((m) => m.t === 'ops' && m.ops.some((o) => o.id === 'v-legal'))), 'the promoted viewer can write now');
-  ok(v1.role.editors === 15, 'editors count stays at 15');
+  ok(v1.role.editors === 20, 'editors count stays at 20');
   // FIFO + reconnect grace: queue v2 and v3 behind full house; an editor drops and comes back (<60 s) ahead of them
   const v2 = await join(nano, 'cv2' + rnd()); all.push(v2);
   ok(v2.role && v2.role.queued && v2.role.pos === 1, `next viewer queued at position ${v2.role && v2.role.pos}`);

@@ -1,0 +1,29 @@
+flowchart LR
+       subgraph PLANNER
+           direction TB
+           P1["Kumpulin fakta:<br/>kode, produksi, server"] --> P2["Reproduksi<br/>Playwright / adb"]
+           P2 --> P3["Bikin issue di GitHub:<br/>tipe, severity, breaking change,<br/>rencana fix"]
+       end                          
+
+       subgraph BUILDER
+           direction TB
+           B1["Ambil issue berikutnya"] --> B2["Tulis tes dulu,<br/>pastikan gagal"]
+           B2 --> B3["Implementasi fix,<br/>tes + uji mutasi lolos"]
+           B3 --> B4["Commit tanpa co-author, push,<br/>comment progres di issue"]
+       end
+
+       subgraph EVALUATOR
+           direction TB
+           E1["Pipeline hijau?"] --> E2["Server sehat?<br/>container, /health, log"]
+           E2 --> E3["Fix jalan di produksi?<br/>skenario reproduksi yang sama"]
+           E3 --> E4["Screenshot bukti,<br/>comment verifikasi, close issue"]
+           E4 --> E5{"Semua issue<br/>sudah beres?"}
+       end
+
+       PLANNER --> BUILDER
+       BUILDER --> EVALUATOR
+       E1 -. "gagal" .-> B1
+       E2 -. "gagal" .-> B1
+       E3 -. "gagal" .-> B1
+       E5 -- "Belum, masih ada issue" --> B1
+       E5 -- "Sudah" --> EXIT(["EXIT:<br/>ringkasan ke kamu<br/>+ simpan ke mem0"])

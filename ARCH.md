@@ -40,6 +40,8 @@ flowchart LR
 
 *Everything left of the edge keeps working with the network down.*
 
+**Data path, in one line.** *Offline / private* documents are written entirely in the browser (IndexedDB, no server involved). *Online / cloud* documents use the server: SQLite for storage and a WebSocket for live collaboration. The live instance is https://coret.app.
+
 ## 02 · Inside draw-server — what the backend does
 
 One Rust process **is** the whole backend: it serves the app, guards every write, keeps live rooms running, and
@@ -130,15 +132,15 @@ N editors means N×N messages) and **decoded image memory** on the client. These
 
 | Guardrail | Limit | What happens at the edge |
 |---|---|---|
-| **Editors per document** | **15 concurrent (+ the owner)** | everyone else joins as a live viewer in a FIFO queue — auto-promoted the moment a slot frees |
+| **Editors per document** | **20 concurrent (+ the owner)** | everyone else joins as a live viewer in a FIFO queue — auto-promoted the moment a slot frees |
 | **Images** | **≤ 2,000 px edge · 2 MB max** | shrunk in the browser before upload; the server refuses anything larger |
 | **Animated GIFs** | **≤ 3 MB, original bytes** | kept byte-identical so they stay animated; larger is refused with a clear message |
 | **Client memory budget** | **< 100 MB typical** | decoded images live in an LRU cache with a pixel budget; GIF frames capped |
 | Elements / document | 5,000 | further edits are refused — the doc stays responsive |
 | Document size | 4 MB serialized | bounds snapshots and reload cost |
-| Connections | 20 per IP | blunt but effective against one-machine floods |
+| Connections | 30 per IP | blunt but effective against one-machine floods |
 
-- **The 15-editor room** — a room can hold many viewers, but only 15 editors at once, so the expensive N×N path
+- **The 20-editor room** — a room can hold many viewers, but only 20 editors at once, so the expensive N×N path
   stays bounded. Viewers still see every stroke live; the queue promotes in join order, no refresh needed.
 - **The memory diet** — decoded bitmaps sit in an LRU cache under a pixel budget (re-decoded on demand from local
   storage), GIF frame caches are capped, and the WASM engine trims its allocations.
@@ -168,7 +170,7 @@ Measured on the production deployment, November 2026.
 | Share URL | `/room-id/nano-id-10` | room names claimable; document ids unguessable |
 | Images | ≤ 2,000 px edge · 2 MB max | shrunk client-side before upload; server-enforced |
 | Animated GIFs | ≤ 3 MB · original bytes | larger is refused with a clear message |
-| Editors per room | 15 concurrent (+ owner) | others watch live in a FIFO queue, auto-promoted |
+| Editors per room | 20 concurrent (+ owner) | others watch live in a FIFO queue, auto-promoted |
 | Client memory | < 100 MB typical | LRU image cache · capped GIF frames |
 | Rate limit | 20 req/s per IP, burst 40 | 429s enforced at the edge |
 | Reconnect | exponential backoff → ~30 s | zero edits lost while offline |

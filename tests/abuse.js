@@ -61,7 +61,7 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
   ws.send(JSON.stringify({ t: 'ops', ops: [{ id: 'x1', v: 1, by: 'abuse1', k: 'rect', x: 1, y: 1, w: 10, h: 10, st: '<script>' }] })); await sleep(200);
   ok(msgs.filter((m) => m.t === 'err').length >= 3, 'bad colour string rejected');
   let closed = false; ws.onclose = () => { closed = true; };
-  ws.send('x'.repeat(2 * 1024 * 1024)); await sleep(800);
+  ws.send('x'.repeat(3 * 1024 * 1024)); await sleep(800);
   ok(closed, 'oversized frame closes the socket');
   const ws2 = await open(`/ws/${R}/${d.nano}`); ws2.onmessage = (e) => msgs.push(JSON.parse(e.data));
   ws2.send(JSON.stringify({ t: 'hello', cid: 'abuse2', name: 'Abuse Two' })); await sleep(300);

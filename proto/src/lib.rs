@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Text elements may hold a whole mermaid diagram or HTML page (the HTML object itself is capped at MAX_HTML_BYTES).
-pub const MAX_TEXT_BYTES: usize = 131_072;
+pub const MAX_TEXT_BYTES: usize = 524_288;
 /// Source of an HTML object (rendered in a sandboxed iframe without scripts).
-pub const MAX_HTML_BYTES: usize = 65_536;
+pub const MAX_HTML_BYTES: usize = 409_600;
 pub const MAX_PTS: usize = 40_000;
 pub const MAX_COORD: f64 = 1.0e7;
 
@@ -91,6 +91,13 @@ pub struct Element {
     /// html object: the markup (rendered in an iframe sandbox without allow-scripts / allow-same-origin)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub src: String,
+    /// rect variant: 0 plain, 1 container (mermaid subgraph: behind its nodes, arrows route through it), 2 stadium (pill)
+    #[serde(default, skip_serializing_if = "is_zero_u")]
+    pub sh: u8,
+    /// arrow: manual route. [o, c1, c2, ...]: o = 0 when the first segment is horizontal, else 1;
+    /// c_i = the fixed y (horizontal segment) or x (vertical segment) of the i-th middle segment
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rt: Vec<f64>,
 }
 
 pub fn valid_id(s: &str) -> bool {
@@ -154,6 +161,12 @@ impl Element {
         }
         if self.k == Kind::Image && !self.del && self.img.is_empty() {
             return Err("image without ref");
+        }
+        if self.sh > 2 || (self.sh != 0 && self.k != Kind::Rect) {
+            return Err("bad shape variant");
+        }
+        if self.rt.len() > 64 || !self.rt.iter().all(|v| fin(*v)) || (!self.rt.is_empty() && self.k != Kind::Arrow) {
+            return Err("bad route");
         }
         if self.src.len() > MAX_HTML_BYTES {
             return Err("html too large");

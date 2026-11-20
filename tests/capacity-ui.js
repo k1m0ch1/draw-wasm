@@ -32,7 +32,7 @@ const fileTo = (p, buf, name, type) => p.evaluate(async ([b64, name, type]) => {
   ok(await V.evaluate(() => window.__draw.edit === false), 'viewer client is read-only');
   socks[0].close();
   await V.waitForFunction(() => window.__draw.edit === true, null, { timeout: 15000 });
-  ok(/^Editing \(\d+\/15\)$/.test(await chip(V)), `promoted in place, chip says "${await chip(V)}"`);
+  ok(/^Editing \(\d+\/20\)$/.test(await chip(V)), `promoted in place, chip says "${await chip(V)}"`);
   const toast = await V.evaluate(() => document.getElementById('toast').textContent);
   ok(/Editing/.test(toast), `toast says "${toast}"`);
   ok(await V.evaluate(() => location.href) === url, 'no reload happened');

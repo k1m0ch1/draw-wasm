@@ -149,7 +149,9 @@ function buildStyle() {
     b.addEventListener('click', () => S.board.set_style('', '~', -1, v, -1));
     return b;
   });
-  sec('Arrow', ...heads);
+  const reset = el('button', { class: 'chip wide', id: 'reset-route', title: 'Back to automatic routing (or double-click a route handle)' }, 'reset route');
+  reset.addEventListener('click', () => { S.board.reset_route(); S.board.invalidate(); });
+  sec('Arrow', ...heads, reset);
   const sizes = [['S', 14], ['M', 18], ['L', 26], ['XL', 38]].map(([n, v]) => {
     const b = el('button', { class: 'chip', title: 'Text size ' + v, 'data-fs': v }, n);
     b.addEventListener('click', () => S.board.set_style('', '~', -1, -1, v));
@@ -187,6 +189,7 @@ function syncStyle() {
   vis(1, none || k.some((x) => ['rect', 'ellipse', 'diamond'].includes(x)));
   vis(2, none || k.some((x) => !['text', 'image'].includes(x)));
   vis(3, none || k.includes('arrow'));
+  $('reset-route').classList.toggle('hidden', !S.board.has_manual_route());
   vis(4, none || k.some((x) => ['rect', 'ellipse', 'diamond', 'text'].includes(x)));
   vis(5, none || k.includes('text')); // Convert: only where it applies, so the panel stays short over shape handles
   vis(6, info.n > 0);
@@ -202,8 +205,8 @@ function convert(kind) {
   const r = kind === 'html' ? b.text_to_html() : b.text_to_mermaid();
   if (r.startsWith('err:')) { toast(r.slice(4) + ' - the text was left as it was (draw v' + VERSION + ')', 7000); return; }
   b.invalidate();
-  if (kind === 'mermaid') { const [, n, e] = r.split(':'); toast(`Flow created: ${n} nodes, ${e} edges (Ctrl+Z undoes it)`, 3500); }
-  else toast('HTML object created (scripts never run). Ctrl+Z undoes it.', 3500);
+  if (kind === 'mermaid') { const [, n, e, s] = r.split(':'); toast(`Flow created next to the text: ${n} nodes, ${e} edges${Number(s) ? ', ' + s + ' subgraphs' : ''} (Ctrl+Z removes it; the text stays)`, 4500); }
+  else toast('HTML object created next to the text (scripts never run). Ctrl+Z removes it; the text stays.', 4500);
 }
 /**
  * HTML objects live in sandboxed iframes under the (transparent) canvas. The sandbox attribute is EMPTY: no
@@ -421,7 +424,7 @@ function layoutEditor() {
     ta.style.height = Math.max(th * z, fs * 1.3) + 'px';
   } else {
     // inside the shape: centred and wrapped to the same width the engine uses when it draws the label
-    ta.style.textAlign = 'center';
+    ta.style.textAlign = e.sh === 1 ? 'left' : 'center';
     ta.style.whiteSpace = 'pre-wrap';
     ta.style.overflowWrap = 'anywhere';
     const w = e.w * z, h = e.h * z;
@@ -431,8 +434,8 @@ function layoutEditor() {
     ta.style.height = '0px';
     const th = Math.max(ta.scrollHeight, fs * 1.3);
     ta.style.height = th + 'px';
-    ta.style.left = s[0] + (w - bw) / 2 + 'px';
-    ta.style.top = s[1] + (h - th) / 2 + 'px';
+    ta.style.left = s[0] + (e.sh === 1 ? 12 * z : (w - bw) / 2) + 'px';
+    ta.style.top = s[1] + (e.sh === 1 ? 6 * z : (h - th) / 2) + 'px';
   }
 }
 function cancelEdit() {
@@ -1022,7 +1025,7 @@ function setPerm(edit, pw) {
   else if (S.wsOpen) uploadImages(JSON.parse(S.board.images_used()));
   roleUi();
 }
-/** Editing slot state from the server: 'Editing (12/15)' or 'Viewing - queue position 3'. The server enforces it. */
+/** Editing slot state from the server: 'Editing (12/20)' or 'Viewing - queue position 3'. The server enforces it. */
 function setRole(m) {
   const was = S.role;
   S.role = m;

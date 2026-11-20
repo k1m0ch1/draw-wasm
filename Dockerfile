@@ -17,6 +17,7 @@ COPY engine ./engine
 COPY server ./server
 COPY web ./web
 COPY scripts ./scripts
+COPY tests/fixtures ./tests/fixtures
 # fails the build when engine_bg.wasm is larger than 2 MiB
 RUN nice -n 19 bash scripts/build-web.sh
 RUN nice -n 19 cargo build --locked --profile server -p draw-server

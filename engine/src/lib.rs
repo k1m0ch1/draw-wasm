@@ -60,6 +60,8 @@ enum G {
     Move { start: P, orig: Vec<Element>, moved: bool },
     Resize { h: usize, orig: Vec<Element>, ob: BB },
     Endpoint { id: String, end: usize },
+    /// dragging a middle segment of a routed arrow: arrow id, segment index (1-based), route description at the start
+    Seg { id: String, j: usize, base: Vec<f64> },
     Marquee { start: P, cur: P, add: bool },
     Create { start: P, cur: P },
     Pencil { pts: Vec<f64> },
@@ -107,6 +109,15 @@ pub struct Board {
     rc: RefCell<HashMap<String, (u64, f64, Vec<P>)>>,
     /// obstacle geometry hash, valid for the document revision stored with it
     geo: std::cell::Cell<(u32, u64)>,
+}
+
+/// Orientation of the first segment of a route: 0 = horizontal, 1 = vertical.
+fn orient_of(r: &[P]) -> f64 {
+    if r.len() >= 2 && (r[0].1 - r[1].1).abs() < 0.01 {
+        0.0
+    } else {
+        1.0
+    }
 }
 
 fn rid() -> String {
@@ -386,6 +397,63 @@ impl Board {
         }
         None
     }
+    /// Drag handles of the selected arrow: (segment index, centre, horizontal segment?) for every middle segment.
+    fn seg_handles(&self) -> Vec<(usize, P, bool)> {
+        let a = match self.single_arrow() {
+            Some(a) => a,
+            None => return vec![],
+        };
+        let r = self.route_of(a);
+        if r.len() < 4 {
+            return vec![];
+        }
+        let o = orient_of(&r);
+        (1..r.len() - 2)
+            .filter(|&j| (r[j].0 - r[j + 1].0).abs() + (r[j].1 - r[j + 1].1).abs() >= 4.0)
+            .map(|j| (j, ((r[j].0 + r[j + 1].0) / 2.0, (r[j].1 + r[j + 1].1) / 2.0), seg_horizontal(o, j)))
+            .collect()
+    }
+    fn seg_at(&self, p: P) -> Option<(String, usize, Vec<f64>)> {
+        let a = self.single_arrow()?;
+        let r = self.route_of(a);
+        let rad = 11.0 / self.zoom;
+        let (j, _, _) = self.seg_handles().into_iter().find(|(_, c, _)| (p.0 - c.0).abs() <= rad && (p.1 - c.1).abs() <= rad)?;
+        Some((a.id.clone(), j, current_rt(&r)))
+    }
+    /// Back to automatic routing for the selected arrow(s). One undo step.
+    pub fn reset_route(&mut self) -> bool {
+        let ids: Vec<String> =
+            self.sel.iter().filter(|i| self.els.get(*i).map_or(false, |e| e.k == Kind::Arrow && !e.del && !e.rt.is_empty())).cloned().collect();
+        if ids.is_empty() || self.ro {
+            return false;
+        }
+        self.begin_tx();
+        for id in ids {
+            if let Some(mut e) = self.els.get(&id).cloned() {
+                e.rt.clear();
+                self.put(e);
+            }
+        }
+        self.end_tx();
+        self.need_render = true;
+        true
+    }
+    /// Does the selection hold an arrow with a manual route?
+    pub fn has_manual_route(&self) -> bool {
+        self.sel.iter().any(|i| self.els.get(i).map_or(false, |e| e.k == Kind::Arrow && !e.del && !e.rt.is_empty()))
+    }
+    /// Screen position and orientation of the segment handles of the selected arrow, as JSON [[j,x,y,horizontal],...]. For tests.
+    pub fn seg_handles_json(&self) -> String {
+        let v: Vec<(usize, f64, f64, bool)> = self
+            .seg_handles()
+            .into_iter()
+            .map(|(j, c, h)| {
+                let s = self.w2s(c.0, c.1);
+                (j, s[0], s[1], h)
+            })
+            .collect();
+        serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
+    }
     fn endpoint_at(&self, p: P) -> Option<(String, usize)> {
         let a = self.single_arrow()?;
         let (s, e) = arrow_ends(&self.els, a);
@@ -463,6 +531,7 @@ impl Board {
             a.pts = vec![s.0, s.1, e.0, e.1];
             a.sb.clear();
             a.eb.clear();
+            a.rt.clear();
             self.put(a);
         }
         for id in ids {
@@ -523,6 +592,13 @@ impl Board {
             self.g = G::Endpoint { id, end };
             return;
         }
+        if !self.ro {
+            if let Some((id, j, base)) = self.seg_at(p) {
+                self.begin_tx();
+                self.g = G::Seg { id, j, base };
+                return;
+            }
+        }
         if let Some(h) = self.handle_at(p) {
             if let Some(ob) = self.sel_bbox() {
                 let orig: Vec<Element> = self.sel.iter().filter_map(|i| self.els.get(i).cloned()).collect();
@@ -544,7 +620,18 @@ impl Board {
                 } else if !self.sel.contains(&id) {
                     self.set_sel(vec![id]);
                 }
-                let orig: Vec<Element> = self.sel.iter().filter_map(|i| self.els.get(i).cloned()).collect();
+                let mut orig: Vec<Element> = self.sel.iter().filter_map(|i| self.els.get(i).cloned()).collect();
+                // a container (mermaid subgraph) carries everything that sits inside it
+                let boxes: Vec<BB> = orig.iter().filter(|e| e.k == Kind::Rect && e.sh == 1).map(|e| (e.x, e.y, e.w, e.h)).collect();
+                if !boxes.is_empty() {
+                    let have: BTreeSet<String> = orig.iter().map(|e| e.id.clone()).collect();
+                    for e in self.els.values().filter(|e| !e.del && !have.contains(&e.id)) {
+                        let b = self.el_bb(e);
+                        if boxes.iter().any(|c| b.0 >= c.0 - 0.5 && b.1 >= c.1 - 0.5 && b.0 + b.2 <= c.0 + c.2 + 0.5 && b.1 + b.3 <= c.1 + c.3 + 0.5) {
+                            orig.push(e.clone());
+                        }
+                    }
+                }
                 if !orig.is_empty() {
                     self.begin_tx();
                     self.g = G::Move { start: p, orig, moved: false };
@@ -583,6 +670,10 @@ impl Board {
                                 e.pts[i * 2 + 1] += dy;
                             }
                         }
+                        shift_rt(&mut e.rt, dx, dy);
+                        if (!e.sb.is_empty() && !ids.contains(&e.sb)) || (!e.eb.is_empty() && !ids.contains(&e.eb)) {
+                            e.rt.clear();
+                        }
                         if !ids.contains(&e.sb) {
                             // a bound end detaches from a shape that is not moving with it
                             if !e.sb.is_empty() {
@@ -612,6 +703,17 @@ impl Board {
                 self.do_resize(h, &orig, ob, p);
                 self.g = G::Resize { h, orig, ob };
             }
+            G::Seg { id, j, base } => {
+                if let Some(mut a) = self.els.get(&id).cloned() {
+                    let mut rt = base.clone();
+                    if j < rt.len() {
+                        rt[j] = if seg_horizontal(rt[0], j) { p.1 } else { p.0 };
+                        a.rt = rt;
+                        self.put(a);
+                    }
+                }
+                self.g = G::Seg { id, j, base };
+            }
             G::Endpoint { id, end } => {
                 let eb = self.hit_at(p, true, "").unwrap_or_default();
                 if let Some(mut a) = self.els.get(&id).cloned() {
@@ -625,6 +727,7 @@ impl Board {
                     } else {
                         a.eb = eb;
                     }
+                    a.rt.clear();
                     // an arrow bound at both ends to the same shape makes no sense
                     if !a.sb.is_empty() && a.sb == a.eb {
                         if end == 0 { a.sb.clear() } else { a.eb.clear() }
@@ -664,6 +767,14 @@ impl Board {
             self.tool_cursor()
         } else if self.endpoint_at(p).is_some() {
             "crosshair".into()
+        } else if let Some(h) =
+            self.seg_handles().into_iter().find(|(_, c, _)| (p.0 - c.0).abs() <= 11.0 / self.zoom && (p.1 - c.1).abs() <= 11.0 / self.zoom)
+        {
+            if h.2 {
+                "ns-resize".into()
+            } else {
+                "ew-resize".into()
+            }
         } else if let Some(h) = self.handle_at(p) {
             CURSORS[h].into()
         } else if self.hit_at(p, false, "").is_some() {
@@ -707,6 +818,7 @@ impl Board {
                 let m = |q: P| (x0 + (q.0 - ob.0) * sx, y0 + (q.1 - ob.1) * sy);
                 let (s2, t2) = (m(s), m(t));
                 e.pts = vec![s2.0, s2.1, t2.0, t2.1];
+                e.rt.clear();
             } else {
                 e.x = x0 + (o.x - ob.0) * sx;
                 e.y = y0 + (o.y - ob.1) * sy;
@@ -728,6 +840,16 @@ impl Board {
         match std::mem::replace(&mut self.g, G::None) {
             G::None => {}
             G::Move { .. } | G::Resize { .. } | G::Endpoint { .. } => self.end_tx(),
+            G::Seg { id, .. } => {
+                // a route that cannot be shown (it would cross a node or fold back) is not kept
+                if let Some(mut a) = self.els.get(&id).cloned() {
+                    if !a.rt.is_empty() && current_rt(&route(&self.els, &a, true)) != a.rt {
+                        a.rt.clear();
+                        self.put(a);
+                    }
+                }
+                self.end_tx();
+            }
             G::Marquee { start, add, .. } => {
                 let r = norm(start, p);
                 self.reorder();
@@ -831,6 +953,10 @@ impl Board {
         let p = self.s2w(sx, sy);
         self.cancel();
         if self.tool != "select" || self.ro {
+            return;
+        }
+        if self.seg_at(p).is_some() {
+            self.reset_route();
             return;
         }
         match self.hit_at(p, false, "") {
@@ -963,6 +1089,10 @@ impl Board {
                 if e.k == Kind::Arrow {
                     let (s, t) = arrow_ends(&self.els, &e);
                     e.pts = vec![s.0 + dx, s.1 + dy, t.0 + dx, t.1 + dy];
+                    shift_rt(&mut e.rt, dx, dy);
+                    if !ids.contains(&e.sb) || !ids.contains(&e.eb) {
+                        e.rt.clear();
+                    }
                     if !ids.contains(&e.sb) {
                         e.sb.clear();
                     }
@@ -998,6 +1128,7 @@ impl Board {
                 }
                 e.sb = map.get(&e.sb).cloned().unwrap_or_default();
                 e.eb = map.get(&e.eb).cloned().unwrap_or_default();
+                shift_rt(&mut e.rt, dx, dy);
             } else {
                 e.x += dx;
                 e.y += dy;
@@ -1478,7 +1609,25 @@ impl Board {
         }
     }
 
-    /// Turn the selected text element into an HTML object. Returns "ok:<id>" or "err:<message>"; on error nothing changed.
+    /// Where a new object of size (w, h) goes: to the RIGHT of the element `src` with a gap, moved further right
+    /// (and finally below everything) while it would overlap something that is already there.
+    fn place_beside(&self, src: &Element, w: f64, h: f64) -> (f64, f64) {
+        let boxes: Vec<BB> = self.els.values().filter(|e| !e.del).map(|e| self.el_bb(e)).collect();
+        let gap = 60.0;
+        let (mut x, y) = (src.x + src.w + gap, src.y);
+        for _ in 0..60 {
+            let hit = boxes.iter().filter(|b| b.0 < x + w + 20.0 && b.0 + b.2 > x - 20.0 && b.1 < y + h + 20.0 && b.1 + b.3 > y - 20.0).map(|b| b.0 + b.2).fold(f64::MIN, f64::max);
+            if hit == f64::MIN {
+                return (x, y);
+            }
+            x = hit + 40.0;
+        }
+        let bottom = boxes.iter().map(|b| b.1 + b.3).fold(src.y + src.h, f64::max);
+        (src.x + src.w + gap, bottom + 60.0)
+    }
+
+    /// Render the selected text as a NEW HTML object to its right; the text stays as it is.
+    /// Returns "ok:<id>" or "err:<message>"; on error nothing changed.
     pub fn text_to_html(&mut self) -> String {
         let (id, tx) = match self.selected_text() {
             Ok(v) => v,
@@ -1493,15 +1642,14 @@ impl Board {
         }
         let old = self.els[&id].clone();
         let mut e = self.new_el(Kind::Html);
-        e.x = old.x;
-        e.y = old.y;
+        let (x, y) = self.place_beside(&old, 520.0, 360.0);
+        e.x = x;
+        e.y = y;
         e.w = 520.0;
         e.h = 360.0;
         e.src = src;
-        e.z = old.z;
         let nid = e.id.clone();
         self.begin_tx();
-        self.remove_ids(&[id]);
         self.put(e);
         self.end_tx();
         self.set_sel(vec![nid.clone()]);
@@ -1525,8 +1673,8 @@ impl Board {
         self.els.get(id).filter(|e| e.k == Kind::Html && !e.del).map(|e| e.src.clone()).unwrap_or_default()
     }
 
-    /// Turn the selected mermaid text into real elements. Returns "ok:<nodes>:<edges>" or "err:<message>".
-    /// Everything (create the flow + remove the text) is one undo step; on error nothing changed.
+    /// Turn the selected mermaid text into real elements, placed as NEW objects to the right of the text
+    /// (the text stays). Returns "ok:<nodes>:<edges>:<subgraphs>" or "err:<message>". One undo step; on error nothing changed.
     pub fn text_to_mermaid(&mut self) -> String {
         let (id, tx) = match self.selected_text() {
             Ok(v) => v,
@@ -1538,20 +1686,47 @@ impl Board {
         };
         let lay = mermaid::layout(&g);
         let old = self.els[&id].clone();
-        let (ox, oy) = (old.x, old.y);
+        let (mut fw, mut fh) = (0.0f64, 0.0f64);
+        for r in lay.pos.iter().chain(lay.subs.iter()) {
+            fw = fw.max(r.0 + r.2);
+            fh = fh.max(r.1 + r.3);
+        }
+        let (ox, oy) = self.place_beside(&old, fw, fh);
         let horiz = matches!(g.dir, mermaid::Dir::Lr | mermaid::Dir::Rl);
         let mut z = self.top_z();
+        let mut subs: Vec<Element> = vec![];
+        let mut sub_ids: Vec<String> = vec![];
+        for (j, sg) in g.subs.iter().enumerate() {
+            let (x, y, w, h) = lay.subs[j];
+            let mut e = self.new_el(Kind::Rect);
+            e.sh = 1;
+            e.x = ox + x;
+            e.y = oy + y;
+            e.w = w;
+            e.h = h;
+            e.fl = "#f8f9fa".into();
+            e.st = "#adb5bd".into();
+            e.sw = 1.5;
+            e.fs = mermaid::FS;
+            e.tx = sg.label.clone();
+            e.z = z;
+            z += 1.0;
+            sub_ids.push(e.id.clone());
+            subs.push(e);
+        }
         let mut made: Vec<Element> = vec![];
         let mut ids: Vec<String> = vec![];
         for (i, n) in g.nodes.iter().enumerate() {
             let (x, y, w, h) = lay.pos[i];
-            let (k, fl) = match n.shape {
-                mermaid::Shape::Rect => (Kind::Rect, "#dbeafe"),
-                mermaid::Shape::Round => (Kind::Rect, "#d3f9d8"),
-                mermaid::Shape::Diamond => (Kind::Diamond, "#fff3bf"),
-                mermaid::Shape::Circle => (Kind::Ellipse, "#f3d9fa"),
+            let (k, fl, sh) = match n.shape {
+                mermaid::Shape::Rect => (Kind::Rect, "#dbeafe", 0),
+                mermaid::Shape::Round => (Kind::Rect, "#d3f9d8", 0),
+                mermaid::Shape::Stadium => (Kind::Rect, "#ffe3e3", 2),
+                mermaid::Shape::Diamond => (Kind::Diamond, "#fff3bf", 0),
+                mermaid::Shape::Circle => (Kind::Ellipse, "#f3d9fa", 0),
             };
             let mut e = self.new_el(k);
+            e.sh = sh;
             e.x = ox + x;
             e.y = oy + y;
             e.w = w;
@@ -1564,12 +1739,20 @@ impl Board {
             ids.push(e.id.clone());
             made.push(e);
         }
+        let end_id = |e: mermaid::End| match e {
+            mermaid::End::N(i) => ids[i].clone(),
+            mermaid::End::S(j) => sub_ids[j].clone(),
+        };
+        let centre = |e: mermaid::End| match e {
+            mermaid::End::N(i) => center(&made[i]),
+            mermaid::End::S(j) => center(&subs[j]),
+        };
         let mut edges: Vec<(Element, String)> = vec![];
         for ed in g.edges.iter().filter(|e| e.a != e.b) {
             let mut a = self.new_el(Kind::Arrow);
-            a.sb = ids[ed.a].clone();
-            a.eb = ids[ed.b].clone();
-            let (ca, cb) = (center(&made[ed.a]), center(&made[ed.b]));
+            a.sb = end_id(ed.a);
+            a.eb = end_id(ed.b);
+            let (ca, cb) = (centre(ed.a), centre(ed.b));
             a.pts = vec![ca.0, ca.1, cb.0, cb.1];
             a.ah = (if ed.head { 1 } else { 0 }) | (if horiz { AH_HINT_H } else { AH_HINT_V }) | (if ed.dash { AH_DASH } else { 0 });
             a.sw = if ed.thick { 4.0 } else { 2.0 };
@@ -1578,7 +1761,10 @@ impl Board {
             edges.push((a, ed.label.clone()));
         }
         // route every edge on the finished layout, then put its label beside the route
-        let mut tmp: Els = made.iter().map(|e| (e.id.clone(), e.clone())).collect();
+        let mut tmp: Els = made.iter().chain(subs.iter()).map(|e| (e.id.clone(), e.clone())).collect();
+        for e in self.els.values().filter(|e| !e.del) {
+            tmp.insert(e.id.clone(), e.clone());
+        }
         for (a, _) in &edges {
             tmp.insert(a.id.clone(), a.clone());
         }
@@ -1604,16 +1790,16 @@ impl Board {
             z += 1.0;
             labels.push(t);
         }
+        let (nn, ne, ns) = (g.nodes.len(), g.edges.len(), g.subs.len());
         self.begin_tx();
-        self.remove_ids(&[id]);
         let mut sel = vec![];
-        for e in made.into_iter().chain(edges.into_iter().map(|x| x.0)).chain(labels) {
+        for e in subs.into_iter().chain(made).chain(edges.into_iter().map(|x| x.0)).chain(labels) {
             sel.push(e.id.clone());
             self.put(e);
         }
         self.end_tx();
         self.set_sel(sel);
-        format!("ok:{}:{}", g.nodes.len(), g.edges.len())
+        format!("ok:{}:{}:{}", nn, ne, ns)
     }
 
     pub fn live_count(&self) -> usize {
@@ -1774,6 +1960,15 @@ impl Board {
                     g.fill("#ffffff");
                     g.stroke(ACCENT, 1.5 / z, 0.0);
                 }
+                if !self.ro {
+                    for (_, c, horiz) in self.seg_handles() {
+                        let (hw, hh) = if horiz { (9.0, 5.0) } else { (5.0, 9.0) };
+                        g.begin();
+                        g.rrect(c.0 - hw / z, c.1 - hh / z, 2.0 * hw / z, 2.0 * hh / z, 3.0 / z);
+                        g.fill("#ffffff");
+                        g.stroke(ACCENT, 1.5 / z, 0.0);
+                    }
+                }
             } else if let Some(b) = self.sel_bbox() {
                 if self.sel.len() > 1 {
                     g.begin();
@@ -1797,6 +1992,7 @@ impl Board {
             Kind::Rect | Kind::Ellipse | Kind::Diamond => {
                 g.begin();
                 match e.k {
+                    Kind::Rect if e.sh == 2 => g.rrect(e.x, e.y, e.w, e.h, e.h / 2.0),
                     Kind::Rect => g.rrect(e.x, e.y, e.w, e.h, 14.0f64.min(e.w / 3.0).min(e.h / 3.0)),
                     Kind::Ellipse => g.ell(e.x + e.w / 2.0, e.y + e.h / 2.0, e.w / 2.0, e.h / 2.0),
                     _ => diamond_path(g, (e.x, e.y, e.w, e.h)),
@@ -1805,7 +2001,15 @@ impl Board {
                     g.fill(&e.fl);
                 }
                 g.stroke(&e.st, sw, 0.0);
-                if !e.tx.is_empty() && !(self.edit_target(&e.id)) {
+                if e.sh == 1 {
+                    // container: the title sits in the header strip, left aligned
+                    if !e.tx.is_empty() && !self.edit_target(&e.id) {
+                        let fs = if e.fs > 0.0 { e.fs } else { 16.0 };
+                        for (i, l) in e.tx.split('\n').enumerate() {
+                            g.text(l, e.x + 16.0, e.y + 22.0 + i as f64 * fs * 1.3, fs, &e.st, "left");
+                        }
+                    }
+                } else if !e.tx.is_empty() && !(self.edit_target(&e.id)) {
                     let fs = if e.fs > 0.0 { e.fs } else { 18.0 };
                     let inner = match e.k {
                         Kind::Rect => e.w - 20.0,
@@ -1892,7 +2096,7 @@ impl Board {
         }
         let key = route_key(&self.els, e, gk.1);
         let t = now();
-        let dragging = matches!(self.g, G::Move { .. } | G::Resize { .. } | G::Endpoint { .. });
+        let dragging = matches!(self.g, G::Move { .. } | G::Resize { .. } | G::Endpoint { .. } | G::Seg { .. });
         let mut c = self.rc.borrow_mut();
         if let Some((k, at, r)) = c.get(&e.id) {
             // while dragging: arrows that do not touch the moving nodes keep their route, the others are refreshed at <= 30 Hz
@@ -1933,6 +2137,9 @@ fn describe(ch: &[Change]) -> String {
             }
             if a.tx != b.tx {
                 return "text".into();
+            }
+            if a.rt != b.rt {
+                return "route".into();
             }
             if a.st != b.st || a.fl != b.fl || a.sw != b.sw || a.fs != b.fs || a.ah != b.ah {
                 return "style".into();

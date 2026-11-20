@@ -82,6 +82,14 @@ pub fn obstacle(k: Kind) -> bool {
     matches!(k, Kind::Rect | Kind::Ellipse | Kind::Diamond | Kind::Image | Kind::Html)
 }
 
+/// Live element that arrows route around. A container (mermaid subgraph, `sh == 1`) is not one: its nodes are.
+pub fn blocks(e: &Element) -> bool {
+    !e.del && obstacle(e.k) && e.sh != 1
+}
+
+/// Header strip of a container, where it is grabbed and where its title sits.
+pub const CONTAINER_HEAD: f64 = 40.0;
+
 pub struct Ends {
     pub s: P,
     pub sd: Option<D>,
@@ -184,7 +192,93 @@ fn axis_dir(from: P, to: P) -> D {
 
 /// Orthogonal route of an arrow as a polyline (first point = start, last = end).
 /// `full` = search around other nodes; otherwise a cheap elbow (used while dragging, throttled).
+/// A manual route (`rt`, set by dragging a segment handle) replaces the automatic one while it still fits.
 pub fn route(els: &Els, a: &Element, full: bool) -> Vec<P> {
+    let auto = route_auto(els, a, full);
+    if a.rt.is_empty() {
+        return auto;
+    }
+    apply_rt(els, &auto, &a.rt).unwrap_or(auto)
+}
+
+fn orient(a: P, b: P) -> f64 {
+    if (a.1 - b.1).abs() < 0.01 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// The manual-route description of a route: [o, c1, ...] (o = 0 when the first segment is horizontal;
+/// c_j = the fixed y (horizontal) or x (vertical) of middle segment j). Empty when there is no middle segment.
+pub fn current_rt(r: &[P]) -> Vec<f64> {
+    if r.len() < 4 {
+        return vec![];
+    }
+    let o = orient(r[0], r[1]);
+    let mut v = vec![o];
+    for j in 1..r.len() - 2 {
+        v.push(if (o as usize + j) % 2 == 0 { r[j].1 } else { r[j].0 });
+    }
+    v
+}
+
+/// Is middle segment `j` (1-based) horizontal in a route that starts with orientation `o`?
+pub fn seg_horizontal(o: f64, j: usize) -> bool {
+    (o as usize + j) % 2 == 0
+}
+
+/// Move a route's middle segments to the stored coordinates. None when the stored route no longer fits the
+/// automatic one (different shape), folds back on itself, or runs through a node: the caller then auto-routes.
+pub fn apply_rt(els: &Els, auto: &[P], rt: &[f64]) -> Option<Vec<P>> {
+    let n = auto.len();
+    if n < 4 || rt.len() != n - 2 || rt[0] != orient(auto[0], auto[1]) || !rt.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let o = rt[0];
+    let mut r = auto.to_vec();
+    for j in 1..n - 2 {
+        let c = rt[j];
+        if seg_horizontal(o, j) {
+            r[j].1 = c;
+            r[j + 1].1 = c;
+        } else {
+            r[j].0 = c;
+            r[j + 1].0 = c;
+        }
+    }
+    for i in 0..n - 1 {
+        let (da, dn) = ((auto[i + 1].0 - auto[i].0) + (auto[i + 1].1 - auto[i].1), (r[i + 1].0 - r[i].0) + (r[i + 1].1 - r[i].1));
+        if da * dn <= 0.0 || dn.abs() < 6.0f64.min(da.abs()) {
+            return None; // folded back or squeezed to nothing
+        }
+    }
+    let hits = |q: &Element| {
+        let (l, t, rr, b) = (q.x + 1.0, q.y + 1.0, q.x + q.w - 1.0, q.y + q.h - 1.0);
+        r.windows(2).any(|w| {
+            let (x0, x1) = (w[0].0.min(w[1].0), w[0].0.max(w[1].0));
+            let (y0, y1) = (w[0].1.min(w[1].1), w[0].1.max(w[1].1));
+            x0 < rr && x1 > l && y0 < b && y1 > t
+        })
+    };
+    if els.values().any(|q| blocks(q) && hits(q)) {
+        return None;
+    }
+    Some(r)
+}
+
+/// Shift a manual route by (dx, dy) (the whole arrow moved).
+pub fn shift_rt(rt: &mut [f64], dx: f64, dy: f64) {
+    if rt.is_empty() {
+        return;
+    }
+    let o = rt[0];
+    for j in 1..rt.len() {
+        rt[j] += if seg_horizontal(o, j) { dy } else { dx };
+    }
+}
+
+fn route_auto(els: &Els, a: &Element, full: bool) -> Vec<P> {
     let n = ends(els, a);
     if n.sd.is_none() && n.ed.is_none() {
         return vec![n.s, n.e];
@@ -271,7 +365,7 @@ pub fn geo_hash(els: &Els) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     };
     let mut acc: u64 = 0;
-    for e in els.values().filter(|e| !e.del && obstacle(e.k)) {
+    for e in els.values().filter(|e| blocks(e)) {
         // order independent: sum of per-element hashes
         let mut x: u64 = 0x9e3779b97f4a7c15;
         for v in [e.x, e.y, e.w, e.h] {
@@ -294,6 +388,9 @@ pub fn route_key(els: &Els, a: &Element, geo: u64) -> u64 {
         mix(v.to_bits());
     }
     mix(a.ah as u64);
+    for v in &a.rt {
+        mix(v.to_bits());
+    }
     for id in [&a.sb, &a.eb] {
         match els.get(id.as_str()) {
             Some(n) => {
@@ -338,7 +435,7 @@ fn search(els: &Els, s1: P, sd: D, e1: P, ed: D) -> Option<Vec<P>> {
     let inside = |r: &R, p: P| p.0 > r.0 && p.0 < r.2 && p.1 > r.1 && p.1 < r.3;
     let mut obs: Vec<R> = els
         .values()
-        .filter(|e| !e.del && obstacle(e.k))
+        .filter(|e| blocks(e))
         .map(|e| (e.x - MARGIN, e.y - MARGIN, e.x + e.w + MARGIN, e.y + e.h + MARGIN))
         .filter(|r| r.0 < win.2 && r.2 > win.0 && r.1 < win.3 && r.3 > win.1)
         .filter(|r| !inside(r, s1) && !inside(r, e1))
@@ -506,7 +603,7 @@ pub fn label_pos(els: &Els, route: &[P], text: &str, fs: f64, taken: &[R]) -> P 
     segs.sort_by(|a, b| cmpf(b.0, a.0));
     let clear = |c: P| {
         let (l, t, r, b) = (c.0 - tw / 2.0, c.1 - th / 2.0, c.0 + tw / 2.0, c.1 + th / 2.0);
-        !els.values().any(|e| !e.del && obstacle(e.k) && e.x < r && e.x + e.w > l && e.y < b && e.y + e.h > t)
+        !els.values().any(|e| blocks(e) && e.x < r && e.x + e.w > l && e.y < b && e.y + e.h > t)
             && !taken.iter().any(|q| q.0 < r && q.2 > l && q.1 < b && q.3 > t)
     };
     for (_, c, horiz) in &segs {
@@ -544,6 +641,11 @@ pub fn dist_seg(p: P, a: P, b: P) -> f64 {
 
 pub fn hit(els: &Els, e: &Element, p: P, tol: f64) -> bool {
     match e.k {
+        Kind::Rect if e.sh == 1 => {
+            // a container is grabbed by its header strip and its border; the inside belongs to what is behind it
+            let inner = p.0 > e.x + 6.0 && p.0 < e.x + e.w - 6.0 && p.1 > e.y + CONTAINER_HEAD && p.1 < e.y + e.h - 6.0;
+            p.0 >= e.x - tol && p.0 <= e.x + e.w + tol && p.1 >= e.y - tol && p.1 <= e.y + e.h + tol && !inner
+        }
         Kind::Rect | Kind::Image | Kind::Text | Kind::Html => {
             p.0 >= e.x - tol && p.0 <= e.x + e.w + tol && p.1 >= e.y - tol && p.1 <= e.y + e.h + tol
         }
@@ -684,6 +786,40 @@ mod tests {
             assert!(!crosses(&r, e), "crosses {}: {:?}", e.id, r);
         }
         assert!(r.len() <= 6, "{:?}", r);
+    }
+
+    #[test]
+    fn manual_route_moves_a_segment_and_falls_back() {
+        // a is left of b, b is lower: a Z route with one vertical middle segment
+        let els = world(vec![node("a", 0.0, 0.0), node("b", 400.0, 200.0), arrow("a", "b")]);
+        let auto = route(&els, &els["ab"], true);
+        assert_eq!(auto.len(), 4, "{:?}", auto);
+        let mut rt = current_rt(&auto);
+        assert_eq!(rt.len(), 2);
+        let c0 = rt[1];
+        rt[1] = c0 - 40.0;
+        let mut a = els["ab"].clone();
+        a.rt = rt.clone();
+        let mut w2 = els.clone();
+        w2.insert("ab".into(), a.clone());
+        let r = route(&w2, &a, true);
+        assert!(orthogonal(&r) && r.len() == 4, "{:?}", r);
+        assert!((r[1].0 - (c0 - 40.0)).abs() < 0.01 && (r[2].0 - (c0 - 40.0)).abs() < 0.01, "{:?}", r);
+        // the end points stay on the nodes
+        assert_eq!(r[0], auto[0]);
+        assert_eq!(r[3], auto[3]);
+        // a segment dragged behind the start folds the route: ignored, auto route comes back
+        a.rt[1] = -200.0;
+        let r = route(&w2, &a, true);
+        assert_eq!(r, auto);
+        // moving b so far that the shape changes: back to auto
+        let mut w3 = w2.clone();
+        w3.get_mut("b").unwrap().y = 0.0;
+        w3.get_mut("b").unwrap().x = 400.0;
+        let mut a2 = w3["ab"].clone();
+        a2.rt = rt;
+        let r = route(&w3, &a2, true);
+        assert_eq!(r.len(), 2, "{:?}", r);
     }
 
     #[test]
