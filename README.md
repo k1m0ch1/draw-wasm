@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.11.0-147a6b?style=flat-square)](web/version.js)
+[![version](https://img.shields.io/badge/version-0.11.1-147a6b?style=flat-square)](web/version.js)
 [![engine](https://img.shields.io/badge/engine-306%20KB%20wasm%20%C2%B7%20137%20KB%20gzip-3b7ea1?style=flat-square)](#size-budget)
 [![accounts](https://img.shields.io/badge/0%20accounts%20%C2%B7%200%20telemetry-8a6fbf?style=flat-square)](#security-model)
 [![license](https://img.shields.io/badge/license-MIT-555?style=flat-square)](LICENSE)

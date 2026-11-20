@@ -34,7 +34,7 @@ const handles = (p) => p.evaluate(() => JSON.parse(window.__draw.board.seg_handl
 
   // ---- 53/58: the build is the new one
   const ver = await O.evaluate(() => window.__draw.version);
-  ok(ver === '0.11.0', `version is 0.11.0 (${ver})`);
+  ok(ver === '0.11.1', `version is 0.11.1 (${ver})`);
 
   // ================= 63/64/65 the real sample
   await O.evaluate(() => window.__draw.board.deselect());

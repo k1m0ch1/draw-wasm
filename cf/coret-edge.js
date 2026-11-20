@@ -10,6 +10,10 @@ export default {
     let target;
     if (u.pathname.startsWith('/api/')) {
       target = ORIGIN + '/coret-api/' + u.pathname.slice(5) + u.search;
+    } else if (u.pathname === '/healthz') {
+      // real health: answered by the backend, never from the edge cache
+      const r = await fetch(ORIGIN + '/coret-healthz', { cf: { cacheTtl: 0 } });
+      return new Response(r.body, { status: r.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
     } else if (u.pathname.startsWith('/ws/')) {
       target = ORIGIN + '/coret-ws/' + u.pathname.slice(4) + u.search;
     } else {
