@@ -12,7 +12,7 @@ Local-first, live-collaborative, one small server binary, one SQLite file.
 
 <img src="docs/hero.gif" width="880" alt="a pasted animated GIF of a chirping cat next to mermaid code that converts into a routed flowchart beside the text" title="paste a GIF, paste mermaid, one click, drag the elbows">
 
-*paste an animated GIF (the cat survives), paste mermaid, zoom out, `text2mermaid` -- an org chart blooms next to the text; then paste HTML and `text2html` renders it as a safe card. Every frame above is the real app, not a mockup. Cat by @faaannnyyy4.*
+*paste an animated GIF (the cat survives), paste mermaid, zoom out, `text2mermaid` -- an org chart blooms and the camera follows it; then paste HTML and `text2html` renders it as a safe card. Every frame above is the real app, not a mockup. Cat by @faaannnyyy4.*
 
 </div>
 
