@@ -134,7 +134,7 @@ async function loadDocs() {
       const c = document.createElement('div'); c.className = 'cardx';
       c.innerHTML = '<canvas></canvas><div class="meta"><a href="https://coret.app/' + esc(d.room) + '/' + esc(d.nano) + '" target="_blank" rel="noopener"><b>' + (esc(d.title) || 'untitled') + '</b></a><br>' + esc(d.room) + ' · ' + d.elements + ' el · ' + agoFrom(d.updated) + ' ago</div>';
       g.appendChild(c);
-      fetch('https://coret.app/api/rooms/' + encodeURIComponent(d.room) + '/docs/' + d.nano).then((r) => r.json()).then((doc) => drawDoc(c.querySelector('canvas'), doc.els || [])).catch(() => drawDoc(c.querySelector('canvas'), []));
+      fetch('/admin/api/doc/' + encodeURIComponent(d.room) + '/' + d.nano).then((r) => r.json()).then((doc) => drawDoc(c.querySelector('canvas'), doc.els || [])).catch(() => drawDoc(c.querySelector('canvas'), []));
     });
     docsOffset += v.docs.length;
     $('docs-more').style.display = docsOffset >= v.total ? 'none' : 'block';
